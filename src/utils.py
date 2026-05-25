@@ -259,30 +259,44 @@ def fetch_spotify_playlist(playlist_url, client_id, client_secret):
     })
     access_token = auth_response.json()['access_token']
     
-    # Fetch playlist data
     headers = {'Authorization': f'Bearer {access_token}'}
-    response = requests.get(f'https://api.spotify.com/v1/playlists/{playlist_id}', 
-                           headers=headers)
-    playlist_data = response.json()
-    
-    print(f"Playlist: {playlist_data['name']}")
-    print(f"Total tracks: {playlist_data['tracks']['total']}")
-    
-    # Handle pagination (Spotify returns max 100 tracks per request)
-    all_tracks = playlist_data['tracks']['items']
-    next_url = playlist_data['tracks']['next']
-    
+
+    # Fetch playlist metadata (name only — the embedded `tracks` object was
+    # removed from this endpoint by Spotify, so we paginate via /tracks below)
+    meta_response = requests.get(
+        f'https://api.spotify.com/v1/playlists/{playlist_id}?fields=name',
+        headers=headers,
+    )
+    meta = meta_response.json()
+    playlist_name = meta.get('name', 'Unknown')
+    print(f"Playlist: {playlist_name}")
+
+    # Fetch tracks via the dedicated tracks endpoint (paginated, max 100/page)
+    tracks_response = requests.get(
+        f'https://api.spotify.com/v1/playlists/{playlist_id}/tracks',
+        headers=headers,
+    )
+    tracks_page = tracks_response.json()
+    all_tracks = tracks_page.get('items', [])
+    next_url = tracks_page.get('next')
+
     while next_url:
         print(f"Fetching more tracks... (currently have {len(all_tracks)})")
         response = requests.get(next_url, headers=headers)
         data = response.json()
-        all_tracks.extend(data['items'])
+        all_tracks.extend(data.get('items', []))
         next_url = data.get('next')
-    
-    playlist_data['tracks']['items'] = all_tracks
+
     print(f"✓ Fetched all {len(all_tracks)} tracks!")
-    
-    return playlist_data
+
+    # Preserve the shape downstream (parse_playlist_data) expects
+    return {
+        'name': playlist_name,
+        'tracks': {
+            'items': all_tracks,
+            'total': tracks_page.get('total', len(all_tracks)),
+        },
+    }
 
 
 def parse_playlist_data(playlist_data):
@@ -840,12 +854,13 @@ def create_solution_side_in_memory(song_name, artist, year, all_years):
     
     # Handle unknown year gracefully
     display_year = str(year) if year is not None else "????"
-    effective_year = year if year is not None else int(np.median(all_years))
-    
+
     # Filter None years out of all_years for color calculation
     valid_years = [y for y in all_years if y is not None]
     if not valid_years:
         valid_years = [2000]  # fallback
+
+    effective_year = year if year is not None else int(np.median(valid_years))
 
     # Get color for this year
     color_rgb = get_year_color(effective_year, valid_years)
