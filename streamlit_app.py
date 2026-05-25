@@ -272,7 +272,7 @@ with st.sidebar:
         "qr_bg_scale": st.session_state.get('qr_scale', 1.0),
         "qr_bg_offset_x": st.session_state.get('qr_x', 0.0),
         "qr_bg_offset_y": st.session_state.get('qr_y', 0.0),
-        "neon_colors": st.session_state.get('neon_colors', db.get('neon_colors', utils.DEFAULT_DESIGN_SETTINGS['neon_colors'])),
+        "neon_colors": st.session_state.get('neon_colors', db.get('neon_colors')),
         "neon_ring_thickness": st.session_state.get('neon_thick', 12),
         "neon_ring_count": st.session_state.get('neon_count', 8),
         "qr_background_mode": qr_bg_mode,
