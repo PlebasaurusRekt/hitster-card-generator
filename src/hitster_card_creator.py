@@ -115,6 +115,13 @@ if __name__ == "__main__":
     parser.add_argument('--ink-save-mode', action='store_true', default=None, help='if set, print the qr cards in ink saving mode (white background, black qr code)')
     parser.add_argument('--card-draw-border', action='store_true', default=None, help='if set, draw border around the qr cards for easier cutting')
     parser.add_argument('--card-label', default=None, help='Add a small label to each card (e.g., event name or playlist identifier)')
+    parser.add_argument('--qr-bg-mode', choices=['transparent', 'solid'], default=None)
+    parser.add_argument('--qr-bg-color', default=None)
+    parser.add_argument('--qr-module-color', default=None)
+    parser.add_argument('--qr-size-ratio', type=float, default=None)
+    parser.add_argument('--bg-type', choices=['solid', 'neon_rings'], default=None)
+    parser.add_argument('--game-title', default=None)
+    parser.add_argument('--game-title-pos', default=None)
     args = parser.parse_args()
 
     PLAYLIST_URL = os.getenv("PLAYLIST_URL", "")
@@ -124,6 +131,14 @@ if __name__ == "__main__":
     INK_SAVING_MODE = os.getenv("INK_SAVING_MODE", "False").lower() == "true"
     CARD_DRAW_BORDER = os.getenv("CARD_DRAW_BORDER", "False").lower() == "true"
     CARD_LABEL = os.getenv("CARD_LABEL", None)
+    
+    QR_BG_MODE = os.getenv("QR_BG_MODE", "solid")
+    QR_BG_COLOR = os.getenv("QR_BG_COLOR", "#FFFFFF")
+    QR_MODULE_COLOR = os.getenv("QR_MODULE_COLOR", "#000000")
+    QR_SIZE_RATIO = float(os.getenv("QR_SIZE_RATIO", "0.45"))
+    BG_TYPE = os.getenv("BG_TYPE", "neon_rings")
+    GAME_TITLE = os.getenv("GAME_TITLE", "")
+    GAME_TITLE_POS = os.getenv("GAME_TITLE_POS", "top")
 
     ink_save_mode = args.ink_save_mode if args.ink_save_mode is not None else INK_SAVING_MODE
     card_draw_border = args.card_draw_border if args.card_draw_border is not None else CARD_DRAW_BORDER
@@ -134,6 +149,15 @@ if __name__ == "__main__":
     db['card_background_color'] = 'white' if ink_save_mode else 'black'
     db['card_border_color'] = 'black' if ink_save_mode else 'white'
     db['card_label'] = card_label
+    
+    db['qr_background_mode'] = args.qr_bg_mode if args.qr_bg_mode is not None else QR_BG_MODE
+    db['qr_background_color'] = args.qr_bg_color if args.qr_bg_color is not None else QR_BG_COLOR
+    db['qr_module_color'] = args.qr_module_color if args.qr_module_color is not None else QR_MODULE_COLOR
+    db['qr_size_ratio'] = args.qr_size_ratio if args.qr_size_ratio is not None else QR_SIZE_RATIO
+    db['qr_bg_type'] = args.bg_type if args.bg_type is not None else BG_TYPE
+    db['qr_title'] = args.game_title if args.game_title is not None else GAME_TITLE
+    db['qr_title_pos'] = args.game_title_pos if args.game_title_pos is not None else GAME_TITLE_POS
+    db['qr_title_enabled'] = bool(db['qr_title'])
 
     print(f"Using client id {CLIENT_ID} to fetch playlist url {PLAYLIST_URL}...")
     print(f"Ink saving mode: {db['ink_saving_mode']}, Draw border: {db['card_draw_border']}, Label: {db['card_label']}\n")

@@ -17,11 +17,78 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.utils import ImageReader
 from reportlab.lib.units import cm
 db = None
+_font_cache = None
 
 # =============================================================================
-# FONT CACHE (loaded once, reused across all cards)
+# DEFAULT DESIGN SETTINGS
 # =============================================================================
-_font_cache = None
+DEFAULT_DESIGN_SETTINGS = {
+    "card_size": 2000,
+    "ink_saving_mode": False,
+    "card_draw_border": False,
+    "card_border_color": (255, 255, 255),
+    "neon_colors": [(255, 0, 100), (0, 200, 255), (0, 255, 120), (255, 255, 0)],
+    
+    "google_font": "Montserrat",
+
+    # QR Side Settings
+    "qr_bg_type": "neon_rings", # "solid", "neon_rings", "image"
+    "qr_bg_color": (0, 0, 0),
+    "qr_bg_image": None, # PIL Image object
+    "qr_bg_scale": 1.0,
+    "qr_bg_offset_x": 0.0,
+    "qr_bg_offset_y": 0.0,
+    
+    "qr_background_mode": "transparent", # "transparent" or "solid"
+    "qr_background_color": (0, 0, 0), # solid backplate color
+    "qr_module_color": (255, 255, 255),
+    "qr_quiet_zone": 2, 
+    "qr_backplate_padding": 40,
+    "qr_backplate_radius": 20,
+    "qr_size_ratio": 0.45,
+    
+    "neon_ring_opacity": 1.0,
+    "neon_ring_thickness": 12,
+    "neon_ring_count": 8,
+    
+    "qr_title": "",
+    "qr_title_enabled": False,
+    "qr_title_pos": "top", # "top", "bottom", "center_above_qr", "center_below_qr"
+    "qr_title_size": 80,
+    "qr_title_color": (255, 255, 255),
+    "qr_title_bg": False,
+
+    # Solution Side Settings
+    "sol_bg_type": "gradient", # "gradient", "image"
+    "sol_bg_image": None,
+    "sol_bg_scale": 1.0,
+    "sol_bg_offset_x": 0.0,
+    "sol_bg_offset_y": 0.0,
+
+    "sol_title": "",
+    "sol_title_enabled": False,
+    "sol_title_pos": "top", # "top", "bottom"
+    "sol_title_size": 80,
+    "sol_title_color": (0, 0, 0),
+    "sol_title_bg": False,
+}
+
+def get_settings(override=None):
+    """Get settings merged with defaults."""
+    settings = DEFAULT_DESIGN_SETTINGS.copy()
+    if db:
+        settings.update(db)
+    if override:
+        settings.update(override)
+    
+    # Ensure colors are tuples if they came as strings
+    for key in ["card_border_color", "qr_bg_color", "qr_background_color", "qr_module_color", "qr_title_color", "sol_title_color"]:
+        if isinstance(settings.get(key), str):
+            try:
+                settings[key] = tuple(int(c * 255) for c in mcolors.to_rgba(settings[key]))
+            except:
+                pass
+    return settings
 
 # =============================================================================
 # YEAR VALIDATION
@@ -335,18 +402,22 @@ def get_year_color(year, all_years):
     count_equal = sum(1 for y in sorted_years if y == year)
     percentile = (count_below + count_equal / 2) / len(sorted_years)
     
-    # Map to color gradient
-    n_colors = len(db['color_gradient'])
+    n_colors = len(db.get('color_gradient', []))
+    if n_colors == 0:
+        return (0.0, 0.0, 0.0) # Fallback to black if no colors
+    if n_colors == 1:
+        return mcolors.to_rgba(db['color_gradient'][0])[:3]
+        
     idx = percentile * (n_colors - 1)
     idx_low = int(np.floor(idx))
     idx_high = int(np.ceil(idx))
     
     if idx_low == idx_high:
-        return mcolors.hex2color(db['color_gradient'][idx_low])
+        return mcolors.to_rgba(db['color_gradient'][idx_low])[:3]
     
     # Linear interpolation
-    color_low = mcolors.hex2color(db['color_gradient'][idx_low])
-    color_high = mcolors.hex2color(db['color_gradient'][idx_high])
+    color_low = mcolors.to_rgba(db['color_gradient'][idx_low])
+    color_high = mcolors.to_rgba(db['color_gradient'][idx_high])
     frac = idx - idx_low
     
     r = color_low[0] + (color_high[0] - color_low[0]) * frac
@@ -356,67 +427,74 @@ def get_year_color(year, all_years):
     return (r, g, b)
 
 
-def load_fonts():
-    """Load Montserrat fonts with cross-platform fallback. Cached after first call."""
-    global _font_cache
-    if _font_cache is not None:
-        return _font_cache
+_google_font_cache = {}
 
-    # Try Montserrat first
-    try:
-        result = (
-            ImageFont.truetype(db['fonts_dict']['year'], 380),
-            ImageFont.truetype(db['fonts_dict']['artist'], 110),
-            ImageFont.truetype(db['fonts_dict']['song'], 100),
-            ImageFont.truetype(db['fonts_dict']['artist'], 50),
-        )
-        _font_cache = result
-        return result
-    except Exception:
-        pass
+def get_google_font(family_name, size, fallback_font):
+    """Downloads a Google Font and caches it, or returns fallback."""
+    if not family_name:
+        return fallback_font
     
-    # Try common system fonts (cross-platform)
-    fallback_fonts = [
-        # Linux
-        ("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 
-         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf"),
-        # macOS
-        ("/System/Library/Fonts/Helvetica.ttc",
-         "/System/Library/Fonts/Helvetica.ttc",
-         "/System/Library/Fonts/Helvetica.ttc"),
-        # Windows
-        ("C:\\Windows\\Fonts\\arialbd.ttf",
-         "C:\\Windows\\Fonts\\arial.ttf",
-         "C:\\Windows\\Fonts\\ariali.ttf"),
-    ]
+    font_id = family_name.lower().replace(" ", "-")
+    cache_key = (font_id, size)
     
-    for bold_path, regular_path, italic_path in fallback_fonts:
+    if cache_key in _google_font_cache:
+        return _google_font_cache[cache_key]
+        
+    font_bytes = _google_font_cache.get(font_id)
+    if not font_bytes:
         try:
-            result = (
-                ImageFont.truetype(bold_path, 300),
-                ImageFont.truetype(regular_path, 140),
-                ImageFont.truetype(italic_path, 140),
-                ImageFont.truetype(regular_path, 50),
-            )
-            _font_cache = result
-            return result
-        except Exception:
-            continue
-    
-    # Last resort
-    print("Warning: Using default fonts (may not look optimal)")
-    default = ImageFont.load_default()
-    result = (default, default, default, default)
-    _font_cache = result
-    return result
+            api_url = f"https://gwfh.mranftl.com/api/fonts/{font_id}"
+            r = requests.get(api_url, timeout=5)
+            if r.status_code == 200:
+                data = r.json()
+                ttf_url = None
+                
+                # Prefer bold (700) or bold-italic if available, otherwise fallback
+                for variant in data.get('variants', []):
+                    if variant.get('id') == '700' and variant.get('ttf'):
+                        ttf_url = variant['ttf']
+                        break
+                
+                if not ttf_url:
+                    for variant in data.get('variants', []):
+                        if variant.get('ttf'):
+                            ttf_url = variant['ttf']
+                            break
+                            
+                if ttf_url:
+                    r_ttf = requests.get(ttf_url, timeout=5)
+                    if r_ttf.status_code == 200:
+                        font_bytes = r_ttf.content
+                        _google_font_cache[font_id] = font_bytes
+        except Exception as e:
+            print(f"Error downloading font: {e}")
+            pass
+            
+    if font_bytes:
+        try:
+            font = ImageFont.truetype(io.BytesIO(font_bytes), size)
+            _google_font_cache[cache_key] = font
+            return font
+        except:
+            pass
+            
+    return fallback_font
+
+def get_font_for_setting(settings, size):
+    """Get the preferred font (Google Font or fallback) for a given size."""
+    try:
+        fallback = ImageFont.truetype(db['fonts_dict']['artist'], size)
+    except:
+        fallback = ImageFont.load_default()
+        
+    return get_google_font(settings.get('google_font', 'Montserrat'), size, fallback)
 
 
-def create_solution_side(song_name, artist, year, all_years, output_path, card_label=None):
+def create_solution_side(song_name, artist, year, all_years, output_path):
     """
     Create solution card with year-based color background.
     """
-    img = create_solution_side_in_memory(song_name, artist, year, all_years, card_label=card_label)    
+    img = create_solution_side_in_memory(song_name, artist, year, all_years)    
     img.save(output_path)
     return output_path
 
@@ -429,6 +507,7 @@ def create_cards_pdf(cards_folder, output_pdf_path):
     Create print-ready PDF with alternating front/back pages.
     4x5 grid (20 cards per page), 5cm x 5cm cards, ready for duplex printing.
     """
+    settings = get_settings()
     c = canvas.Canvas(output_pdf_path, pagesize=A4)
     width, height = A4
     
@@ -459,10 +538,13 @@ def create_cards_pdf(cards_folder, output_pdf_path):
         end_card = min(start_card + cards_per_page, len(qr_images))
         
         # FRONT PAGE (QR codes)
-        if db.get('ink_saving_mode'):
-            c.setFillColorRGB(1, 1, 1)
-        else:
-            c.setFillColorRGB(0, 0, 0)
+        bg_color = settings.get('card_background_color', (0, 0, 0))
+        if isinstance(bg_color, str):
+            try:
+                bg_color = mcolors.hex2color(bg_color)
+            except:
+                bg_color = (0, 0, 0)
+        c.setFillColorRGB(bg_color[0], bg_color[1], bg_color[2])
         c.rect(0, 0, width, height, stroke=0, fill=1)
         
         for card_idx in range(start_card, end_card):
@@ -510,87 +592,249 @@ def create_cards_pdf(cards_folder, output_pdf_path):
 # WEBUTILS
 # =============================================================================
 
-def create_qr_with_neon_rings_in_memory(qr_code, seed=42):
-    """
-    Create QR code card with colorful neon rings background.
-    seed: per-card seed for unique ring patterns.
-    """
-    size = db['card_size']
-    background_color = db['card_background_color']
-    border_color = db['card_border_color']
-    draw_border = db.get('card_draw_border', False)
-    img = Image.new("RGB", (size, size), background_color)
-    # draw border around the card for easier cutting
-    if draw_border:
-        border_draw = ImageDraw.Draw(img)
-        border_width = 20
-        border_draw.rectangle(
-            [(border_width, border_width), (size - border_width, size - border_width)],
-            outline=border_color,
-            width=border_width
-        )
+def apply_background_image(img, bg_img, scale, offset_x, offset_y, card_size):
+    """Applies scaled and offset background image to card."""
+    aspect = bg_img.width / bg_img.height
+    
+    if aspect > 1:
+        base_h = card_size
+        base_w = int(card_size * aspect)
+    else:
+        base_w = card_size
+        base_h = int(card_size / aspect)
+        
+    new_w = int(base_w * scale)
+    new_h = int(base_h * scale)
+    
+    resized = bg_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+    
+    x = (card_size - new_w) // 2 + int(offset_x * card_size)
+    y = (card_size - new_h) // 2 + int(offset_y * card_size)
+    
+    if resized.mode in ('RGBA', 'LA') or (resized.mode == 'P' and 'transparency' in resized.info):
+        resized = resized.convert("RGBA")
+        img.paste(resized, (x, y), resized)
+    else:
+        img.paste(resized, (x, y))
+
+
+def render_card_background(img, settings, side="qr", seed=42):
+    """Render the card background (solid, neon rings, or image)."""
+    size = settings['card_size']
+    
+    if side == "qr":
+        bg_type = settings['qr_bg_type']
+        bg_color = settings['qr_bg_color']
+        bg_img = settings.get('qr_bg_image')
+        scale = settings['qr_bg_scale']
+        offset_x = settings['qr_bg_offset_x']
+        offset_y = settings['qr_bg_offset_y']
+    else:
+        bg_type = settings['sol_bg_type']
+        # Solution side uses its dynamic year color if type is "gradient", else maybe image over it
+        bg_img = settings.get('sol_bg_image')
+        scale = settings['sol_bg_scale']
+        offset_x = settings['sol_bg_offset_x']
+        offset_y = settings['sol_bg_offset_y']
+        bg_color = (0, 0, 0) # Fallback
 
     draw = ImageDraw.Draw(img)
     
-    # Draw neon rings — unique pattern per card
-    center = size // 2
-    max_radius = size // 2 - 50
+    # Fill the entire background with the selected color first
+    if side == "qr":
+        draw.rectangle([(0, 0), (size, size)], fill=bg_color)
     
-    random.seed(seed)
-    for i, color in enumerate(db['neon_colors'] * 2):
-        radius = max_radius - i * 50
-        if radius <= 0:
-            break
+    if bg_type == "image" and bg_img:
+        apply_background_image(img, bg_img, scale, offset_x, offset_y, size)
+    elif bg_type == "neon_rings" and side == "qr":
+        # Draw neon rings — unique pattern per card
+        center = size // 2
+        max_radius = size // 2 - 50
         
-        # Draw arc with random gaps
-        num_gaps = random.randint(1, 3)
-        for gap in range(num_gaps):
-            gap_start = random.randint(0, 360)
-            gap_length = random.randint(20, 60)
+        qr_size = int(size * settings['qr_size_ratio'])
+        safety_radius = (qr_size // 2) + settings['qr_backplate_padding'] + 20
+        
+        random.seed(seed)
+        neon_colors = settings['neon_colors']
+        ring_count = settings.get('neon_ring_count', 8)
+        thickness = settings.get('neon_ring_thickness', 12)
+        
+        for i in range(ring_count):
+            color = neon_colors[i % len(neon_colors)]
+            radius = max_radius - i * (max_radius // ring_count)
+            if radius <= 0:
+                break
             
-            draw.arc(
-                (center - radius, center - radius, center + radius, center + radius),
-                start=0, end=360, fill=color, width=12
-            )
-            draw.arc(
-                (center - radius, center - radius, center + radius, center + radius),
-                start=gap_start, end=gap_start + gap_length, fill=background_color, width=12
-            )
+            is_inside_safety = radius < safety_radius
+            
+            if settings['qr_background_mode'] == "solid" and is_inside_safety:
+                continue
+                
+            num_gaps = random.randint(1, 3)
+            for gap in range(num_gaps):
+                gap_start = random.randint(0, 360)
+                gap_length = random.randint(20, 60)
+                
+                draw.arc(
+                    (center - radius, center - radius, center + radius, center + radius),
+                    start=0, end=360, fill=color, width=thickness
+                )
+                draw.arc(
+                    (center - radius, center - radius, center + radius, center + radius),
+                    start=gap_start, end=gap_start + gap_length, fill=bg_color, width=thickness
+                )
+
+    # Draw border
+    if settings.get('card_draw_border'):
+        border_width = 20
+        draw.rectangle(
+            [(border_width, border_width), (size - border_width, size - border_width)],
+            outline=settings['card_border_color'],
+            width=border_width
+        )
+
+def render_qr_backplate(img, settings):
+    """Render a solid backplate for the QR code if configured."""
+    if settings['qr_background_mode'] != "solid":
+        return
+        
+    size = settings['card_size']
+    qr_size = int(size * settings['qr_size_ratio'])
+    padding = settings['qr_backplate_padding']
+    radius = settings['qr_backplate_radius']
+    bg_color = settings['qr_background_color']
     
-    # Overlay QR code
-    qr_size = int(size * 0.45)
+    center = size // 2
+    side = qr_size + 2 * padding
+    left = center - side // 2
+    top = center - side // 2
+    right = left + side
+    bottom = top + side
+    
+    overlay = Image.new("RGBA", (size, size), (0,0,0,0))
+    overlay_draw = ImageDraw.Draw(overlay)
+    
+    if radius > 0:
+        overlay_draw.rounded_rectangle([left, top, right, bottom], radius=radius, fill=bg_color)
+    else:
+        overlay_draw.rectangle([left, top, right, bottom], fill=bg_color)
+        
+    img.paste(overlay, (0, 0), overlay)
+
+def render_qr_code(img, qr_code, settings):
+    """Render the QR code modules on top of the card."""
+    size = settings['card_size']
+    center = size // 2
+    qr_size_base = int(size * settings['qr_size_ratio'])
+    quiet_zone = settings.get('qr_quiet_zone', 2)
+    
     qr_code_rgb = qr_code.convert('RGB')
-    qr_code_resized = qr_code_rgb.resize((qr_size, qr_size), Image.Resampling.LANCZOS)
+    qr_code_resized = qr_code_rgb.resize((qr_size_base, qr_size_base), Image.Resampling.LANCZOS)
     
-    # Create a robust module mask
     qr_l = qr_code_resized.convert('L')
     arr = np.array(qr_l)
-    dark_mask = arr < 128
-    num_dark = dark_mask.sum()
-    total = arr.size
-    if num_dark < total / 2:
-        modules_mask = dark_mask
-    else:
-        modules_mask = ~dark_mask
-
+    modules_mask = arr > 128
     mask_img = Image.fromarray((modules_mask.astype('uint8') * 255)).convert('1')
     
-    left = center - qr_size // 2
-    top = center - qr_size // 2
-    bg_crop = img.crop((left, top, left + qr_size, top + qr_size)).convert('L')
-    bg_mean = np.array(bg_crop).mean()
-    module_color = (0, 0, 0) if bg_mean > 127 else (255, 255, 255)
+    left = center - qr_size_base // 2
+    top = center - qr_size_base // 2
     
-    overlay = Image.new('RGB', (qr_size, qr_size), module_color)
+    module_color = settings['qr_module_color']
+    
+    if settings['qr_background_mode'] == "transparent":
+        bg_crop = img.crop((left, top, left + qr_size_base, top + qr_size_base)).convert('L')
+        bg_mean = np.array(bg_crop).mean()
+        if module_color == (255, 255, 255) or module_color == (0, 0, 0):
+             module_color = (0, 0, 0) if bg_mean > 127 else (255, 255, 255)
+    
+    overlay = Image.new('RGB', (qr_size_base, qr_size_base), module_color)
     img.paste(overlay, (left, top), mask_img)
+
+def render_game_title(img, settings, side="qr"):
+    """Render the game title / card label."""
+    prefix = "qr" if side == "qr" else "sol"
     
+    if not settings.get(f'{prefix}_title_enabled') or not settings.get(f'{prefix}_title'):
+        return
+        
+    title = settings[f'{prefix}_title']
+    pos = settings.get(f'{prefix}_title_pos', 'top')
+    font_size = settings.get(f'{prefix}_title_size', 80)
+    color = settings.get(f'{prefix}_title_color', (255, 255, 255) if side == 'qr' else (0, 0, 0))
+    bg_enabled = settings.get(f'{prefix}_title_bg', False)
+    bg_color = settings.get('qr_bg_color', (0, 0, 0)) if side == 'qr' else (255, 255, 255)
+
+    size = settings['card_size']
+    margin = 100
+    
+    draw = ImageDraw.Draw(img)
+    font = get_font_for_setting(settings, font_size)
+        
+    bbox = draw.textbbox((0, 0), title, font=font)
+    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    
+    center = size // 2
+    qr_bound = center + int(size * settings.get('qr_size_ratio', 0.45)) // 2 + settings.get('qr_backplate_padding', 40)
+    bw = settings.get('sol_border_width', 100) // 2
+
+    positions = {
+        "top": (center, margin + th // 2, "mm"),
+        "bottom": (center, size - margin - th // 2, "mm"),
+        "top_left": (margin + tw // 2, margin + th // 2, "mm"),
+        "top_right": (size - margin - tw // 2, margin + th // 2, "mm"),
+        "bottom_left": (margin + tw // 2, size - margin - th // 2, "mm"),
+        "bottom_right": (size - margin - tw // 2, size - margin - th // 2, "mm"),
+        "center_above_qr": (center, size - qr_bound - margin - th // 2, "mm"),
+        "center_below_qr": (center, qr_bound + margin + th // 2, "mm"),
+        "in_border_bottom_right": (size - bw, size - bw, "rm"),
+        "in_border_bottom_left": (bw, size - bw, "lm"),
+        "in_border_top_right": (size - bw, bw, "rm"),
+        "in_border_top_left": (bw, bw, "lm"),
+    }
+    
+    if pos not in positions:
+        return
+        
+    x, y, anchor = positions[pos]
+
+    if bg_enabled:
+        bg_padding = 15
+        overlay = Image.new("RGBA", (size, size), (0,0,0,0))
+        overlay_draw = ImageDraw.Draw(overlay)
+        
+        left = x - tw - bg_padding if anchor == "rm" else (x - bg_padding if anchor == "lm" else x - tw // 2 - bg_padding)
+        right = x + bg_padding if anchor == "rm" else (x + tw + bg_padding if anchor == "lm" else x + tw // 2 + bg_padding)
+        
+        overlay_draw.rectangle([left, y - th // 2 - bg_padding, right, y + th // 2 + bg_padding], fill=bg_color)
+        img.paste(overlay, (0, 0), overlay)
+
+    draw.text((x, y), title, fill=color, font=font, anchor=anchor)
+
+def create_qr_with_neon_rings_in_memory(qr_code, seed=42, settings_override=None):
+    """
+    Create QR code card with colorful neon rings background.
+    seed: per-card seed for unique ring patterns.
+    settings_override: dict of settings to override defaults.
+    """
+    settings = get_settings(settings_override)
+    size = settings['card_size']
+    
+    # Base background (will be overriden by render_card_background if needed)
+    img = Image.new("RGB", (size, size), settings['qr_bg_color'])
+    
+    render_card_background(img, settings, side="qr", seed=seed)
+    render_qr_backplate(img, settings)
+    render_qr_code(img, qr_code, settings)
+    render_game_title(img, settings, side="qr")
+        
     return img
 
-def create_solution_side_in_memory(song_name, artist, year, all_years, card_label=None):
+def create_solution_side_in_memory(song_name, artist, year, all_years):
     """
     Create solution card and return the PIL Image object directly.
     """
-    size = db['card_size']
+    settings = get_settings()
+    size = settings['card_size']
     margin = 150
     max_width = size - (2 * margin)
     
@@ -608,17 +852,23 @@ def create_solution_side_in_memory(song_name, artist, year, all_years, card_labe
     color_int = tuple(int(c * 255) for c in color_rgb)
     
     # Create the base image
-    ink_saving_mode = db.get('ink_saving_mode', False)
-    background_color = db.get('card_background_color', 'white') if ink_saving_mode else color_int
-    border_width = 100
+    ink_saving_mode = settings.get('ink_saving_mode', False)
+    background_color = (255, 255, 255) if ink_saving_mode else color_int
+    border_width = settings.get('sol_border_width', 100)
 
     img = Image.new("RGB", (size, size), background_color)
+    
+    # Apply background overrides for solution side
+    render_card_background(img, settings, side="sol")
+    
     if ink_saving_mode:
         draw = ImageDraw.Draw(img)
         draw.rectangle([(0, 0), (size - 1, size - 1)], outline=color_int, width=border_width)
     draw = ImageDraw.Draw(img)
     
-    font_year, font_artist, font_song, font_label = load_fonts()
+    font_year = get_font_for_setting(settings, 380)
+    font_artist = get_font_for_setting(settings, 110)
+    font_song = get_font_for_setting(settings, 100)
     
     # Choose text color based on background luminance for contrast
     if ink_saving_mode:
@@ -670,10 +920,8 @@ def create_solution_side_in_memory(song_name, artist, year, all_years, card_labe
         draw.text((center_x, song_y), song_text, fill=text_color,
                  font=font_song, anchor="mm")
         
-    if card_label:
-        label_y = size - border_width // 2
-        label_x = size - border_width // 2
-        draw.text((label_x, label_y), card_label, fill=text_color, font=font_label, anchor="rm")
+    # Render Custom Title on Solution Side
+    render_game_title(img, settings, side="sol")
     
     return img
 
@@ -747,6 +995,8 @@ def fetch_no_api_data_from_list(urls, progress_bar=None):
 def create_pdf_in_memory(songs, progress_bar=None):
     if not songs:
         return None
+    
+    settings = get_settings()
 
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
@@ -767,10 +1017,13 @@ def create_pdf_in_memory(songs, progress_bar=None):
         batch_songs = list(songs[i:i+20])
 
         # --- PAGE 1: FRONT (QR CODES) ---
-        if db.get('ink_saving_mode'):
-            c.setFillColorRGB(1, 1, 1)
-        else:
-            c.setFillColorRGB(0, 0, 0)
+        bg_color = settings.get('card_background_color', (0, 0, 0))
+        if isinstance(bg_color, str):
+            try:
+                bg_color = mcolors.hex2color(bg_color)
+            except:
+                bg_color = (0, 0, 0)
+        c.setFillColorRGB(bg_color[0], bg_color[1], bg_color[2])
         c.rect(0, 0, width, height, stroke=0, fill=1)
 
         for idx, song in enumerate(batch_songs):
@@ -804,7 +1057,7 @@ def create_pdf_in_memory(songs, progress_bar=None):
             y = height - margin_y - (row + 1) * card_size
             
             sol_pil = create_solution_side_in_memory(
-                song['name'], song['artist'], song['year'], years, card_label=card_label
+                song['name'], song['artist'], song['year'], years
             ) 
             sol_byte_arr = io.BytesIO()
             sol_pil.save(sol_byte_arr, format='PNG')
