@@ -217,7 +217,7 @@ Pull requests welcome! Ideas:
 A huge thanks to the following people for helping make this project better:
 
 - **[cdaller](https://github.com/cdaller)** — Ink-saving mode, improved QR code logic, enhanced year accuracy.
-
+- **[thommy86](https://github.com/thommy86)** — General Streamlit UI Overhaul, added game titles, custom backgrounds.
 ---
 
 ## 📜 License
