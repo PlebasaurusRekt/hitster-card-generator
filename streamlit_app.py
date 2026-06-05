@@ -258,14 +258,14 @@ with st.sidebar:
             st.session_state.sol_title_color = st.color_picker("Title Color", value="#000000", key="sol_t_c")
             st.session_state.sol_title_bg = st.toggle("Draw Background Box", key="sol_t_bg")
 
-    # Build a per-session settings snapshot — never written to the shared utils.db
-    user_settings = {
+    # Update db with all settings
+    db.update({
         "ink_saving_mode": ink_mode,
         "card_draw_border": border_mode,
         "card_background_color": "#FFFFFF" if ink_mode else qr_bg_color,
         "google_font": google_font,
         "color_gradient": st.session_state.get('color_gradient', db.get('color_gradient')),
-
+        
         "qr_bg_type": qr_bg_type,
         "qr_bg_color": qr_bg_color,
         "qr_bg_image": st.session_state.get('qr_bg_img'),
@@ -287,7 +287,7 @@ with st.sidebar:
         "qr_title_size": st.session_state.get('qr_t_s', 80),
         "qr_title_color": st.session_state.get('qr_title_color', "#FFFFFF"),
         "qr_title_bg": st.session_state.get('qr_t_bg', False),
-
+        
         "sol_bg_type": sol_bg_type,
         "sol_bg_image": st.session_state.get('sol_bg_img'),
         "sol_bg_scale": st.session_state.get('sol_scale', 1.0),
@@ -300,7 +300,7 @@ with st.sidebar:
         "sol_title_size": st.session_state.get('sol_t_s', 80),
         "sol_title_color": st.session_state.get('sol_title_color', "#000000"),
         "sol_title_bg": st.session_state.get('sol_t_bg', False),
-    }
+    })
 with st.expander("Disclaimer, Accuracy & Support"):
     st.info("""
     **Why are some years wrong?**
@@ -440,7 +440,7 @@ if songs:
                                                    help="Where the year came from"),
             "Link": st.column_config.TextColumn("Link", disabled=False),
         },
-        width='stretch',
+        use_container_width=True,
         num_rows="fixed",
         hide_index=True,
     )
@@ -474,16 +474,15 @@ if songs:
         st.caption("QR Side")
         link_str = str(preview_song['Link']) if pd.notna(preview_song['Link']) else "https://open.spotify.com/"
         qr_img = utils.create_qr_code(link_str)
-        qr_card = utils.create_qr_with_neon_rings_in_memory(qr_img, seed=hash(link_str), settings_override=user_settings)
-        st.image(qr_card, width='stretch')
+        qr_card = utils.create_qr_with_neon_rings_in_memory(qr_img, seed=hash(link_str))
+        st.image(qr_card, use_container_width=True)
     with pcol2:
         st.caption("Solution Side")
         sol_card = utils.create_solution_side_in_memory(
-            str(preview_song['Song']), str(preview_song['Artist']),
-            preview_year, valid_preview_years,
-            settings_override=user_settings
+            str(preview_song['Song']), str(preview_song['Artist']), 
+            preview_year, valid_preview_years
         )
-        st.image(sol_card, width='stretch')
+        st.image(sol_card, use_container_width=True)
 
     # --- STEP 3: GENERATE PDF ---
     st.divider()
@@ -512,7 +511,7 @@ if songs:
 
         with st.status("Generating cards...", expanded=True) as status:
             progress_bar = st.progress(0, text="Starting PDF generation...")
-            pdf_data = utils.create_pdf_in_memory(songs, progress_bar, settings_override=user_settings)
+            pdf_data = utils.create_pdf_in_memory(songs, progress_bar)
             status.update(label="✅ All Cards Generated!", state="complete")
             progress_bar.empty()
 
