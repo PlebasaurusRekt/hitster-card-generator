@@ -1,5 +1,4 @@
 beautifulsoup4
-matplotlib>=3.10.0
 numpy
 pandas
 pillow
@@ -7,4 +6,4 @@ qrcode
 reportlab
 requests
 python-dotenv
-streamlit>=1.45.0
+streamlit>=1.52.2
