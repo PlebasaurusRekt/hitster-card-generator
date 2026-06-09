@@ -1,7 +1,6 @@
 import streamlit as st
 from PIL import Image
 import pandas as pd
-import matplotlib.colors as mcolors
 import src.utils as utils
 
 # Per-session default for the year-color gradient. Settings are kept in
@@ -188,7 +187,7 @@ with st.sidebar:
             
             neon_hex_list = dynamic_color_list("neon", "Neon Ring Colors", ["#FF0064", "#00C8FF", "#00FF78", "#FFFF00"])
             try:
-                st.session_state.neon_colors = [tuple(int(val * 255) for val in mcolors.to_rgba(c)) for c in neon_hex_list]
+                st.session_state.neon_colors = [tuple(int(val * 255) for val in utils.to_rgba(c)) for c in neon_hex_list]
             except:
                 st.session_state.neon_colors = [(255, 0, 100), (0, 200, 255), (0, 255, 120), (255, 255, 0)]
                 

@@ -12,13 +12,46 @@ import urllib.parse
 from datetime import datetime
 from bs4 import BeautifulSoup
 from PIL import Image, ImageOps, ImageDraw, ImageFont
-import matplotlib.colors as mcolors
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from reportlab.lib.utils import ImageReader
 from reportlab.lib.units import cm
 db = None
 _font_cache = None
+
+
+def to_rgba(color):
+    """Convert a color to (r, g, b, a) floats in 0..1.
+
+    Replaces matplotlib.colors.to_rgba for our use (hex strings from color
+    pickers, plus the occasional RGB(A) tuple), so the app doesn't pull in
+    the heavy matplotlib dependency just for color parsing. For "#RRGGBB"
+    input the result is byte-identical to matplotlib's (both do int/255).
+    """
+    if isinstance(color, (tuple, list)):
+        vals = [float(v) for v in color]
+        if any(v > 1 for v in vals):  # looks like 0..255
+            vals = [v / 255.0 for v in vals]
+        if len(vals) == 3:
+            vals.append(1.0)
+        return tuple(vals[:4])
+
+    s = str(color).strip().lstrip('#')
+    try:
+        if len(s) in (3, 4):  # shorthand: expand each nibble
+            s = ''.join(ch * 2 for ch in s)
+        r = int(s[0:2], 16) / 255.0
+        g = int(s[2:4], 16) / 255.0
+        b = int(s[4:6], 16) / 255.0
+        a = int(s[6:8], 16) / 255.0 if len(s) >= 8 else 1.0
+        return (r, g, b, a)
+    except (ValueError, IndexError):
+        return (0.0, 0.0, 0.0, 1.0)  # safe fallback, matches old except branches
+
+
+def hex2color(color):
+    """RGB-only variant of to_rgba (replaces matplotlib.colors.hex2color)."""
+    return to_rgba(color)[:3]
 
 # =============================================================================
 # DEFAULT DESIGN SETTINGS
@@ -96,7 +129,7 @@ def get_settings(override=None):
     for key in ["card_border_color", "qr_bg_color", "qr_background_color", "qr_module_color", "qr_title_color", "sol_title_color"]:
         if isinstance(settings.get(key), str):
             try:
-                settings[key] = tuple(int(c * 255) for c in mcolors.to_rgba(settings[key]))
+                settings[key] = tuple(int(c * 255) for c in to_rgba(settings[key]))
             except:
                 pass
     return settings
@@ -435,18 +468,18 @@ def get_year_color(year, all_years, settings=None):
     if n_colors == 0:
         return (0.0, 0.0, 0.0) # Fallback to black if no colors
     if n_colors == 1:
-        return mcolors.to_rgba(gradient[0])[:3]
+        return to_rgba(gradient[0])[:3]
 
     idx = percentile * (n_colors - 1)
     idx_low = int(np.floor(idx))
     idx_high = int(np.ceil(idx))
 
     if idx_low == idx_high:
-        return mcolors.to_rgba(gradient[idx_low])[:3]
+        return to_rgba(gradient[idx_low])[:3]
 
     # Linear interpolation
-    color_low = mcolors.to_rgba(gradient[idx_low])
-    color_high = mcolors.to_rgba(gradient[idx_high])
+    color_low = to_rgba(gradient[idx_low])
+    color_high = to_rgba(gradient[idx_high])
     frac = idx - idx_low
     
     r = color_low[0] + (color_high[0] - color_low[0]) * frac
@@ -570,7 +603,7 @@ def create_cards_pdf(cards_folder, output_pdf_path):
         bg_color = settings.get('card_background_color', (0, 0, 0))
         if isinstance(bg_color, str):
             try:
-                bg_color = mcolors.hex2color(bg_color)
+                bg_color = hex2color(bg_color)
             except:
                 bg_color = (0, 0, 0)
         c.setFillColorRGB(bg_color[0], bg_color[1], bg_color[2])
@@ -1051,7 +1084,7 @@ def create_pdf_in_memory(songs, progress_bar=None, settings_override=None):
         bg_color = settings.get('card_background_color', (0, 0, 0))
         if isinstance(bg_color, str):
             try:
-                bg_color = mcolors.hex2color(bg_color)
+                bg_color = hex2color(bg_color)
             except:
                 bg_color = (0, 0, 0)
         c.setFillColorRGB(bg_color[0], bg_color[1], bg_color[2])
