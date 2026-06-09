@@ -432,7 +432,7 @@ if songs:
                                                    help="Where the year came from"),
             "Link": st.column_config.TextColumn("Link", disabled=False),
         },
-        use_container_width=True,
+        width="stretch",
         num_rows="fixed",
         hide_index=True,
     )
@@ -469,14 +469,14 @@ if songs:
         link_str = str(preview_song['Link']) if pd.notna(preview_song['Link']) else "https://open.spotify.com/"
         qr_img = utils.create_qr_code(link_str)
         qr_card = utils.create_qr_with_neon_rings_in_memory(qr_img, seed=hash(link_str), settings_override=settings)
-        st.image(qr_card, use_container_width=True)
+        st.image(qr_card, width="stretch")
     with pcol2:
         st.caption("Solution Side")
         sol_card = utils.create_solution_side_in_memory(
             str(preview_song['Song']), str(preview_song['Artist']),
             preview_year, valid_preview_years, settings_override=settings
         )
-        st.image(sol_card, use_container_width=True)
+        st.image(sol_card, width="stretch")
 
     # --- STEP 3: GENERATE PDF ---
     st.divider()
@@ -519,5 +519,5 @@ if songs:
             data=st.session_state.pdf_data,
             file_name="my_hitster_cards.pdf",
             mime="application/pdf",
-            use_container_width=True
+            width="stretch"
         )
