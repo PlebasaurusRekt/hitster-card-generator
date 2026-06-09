@@ -1,25 +1,16 @@
 import streamlit as st
-import os
 from PIL import Image
 import pandas as pd
 import matplotlib.colors as mcolors
 import src.utils as utils
 
-if getattr(utils, 'db', None) is None or not utils.db:
-    utils.db = {
-        "fonts_dict": {
-            'year': os.path.join("fonts", "Montserrat-Bold.ttf"),
-            'artist': os.path.join("fonts", "Montserrat-SemiBold.ttf"),
-            'song': os.path.join("fonts", "Montserrat-MediumItalic.ttf")
-        },
-        "color_gradient": [
-            "#7030A0", "#E31C79", "#FF6B9D", "#FFA500", 
-            "#FFD700", "#87CEEB", "#4169E1"
-        ],
-        "card_size": 2000,
-        "neon_colors": [(255, 0, 100), (0, 200, 255), (0, 255, 120), (255, 255, 0)]
-    }
-db = utils.db
+# Per-session default for the year-color gradient. Settings are kept in
+# st.session_state (per user) rather than a shared module global to avoid
+# cross-session bleed when multiple users hit the same Streamlit server.
+DEFAULT_COLOR_GRADIENT = [
+    "#7030A0", "#E31C79", "#FF6B9D", "#FFA500",
+    "#FFD700", "#87CEEB", "#4169E1",
+]
 
 OUTPUT_DIR = "output"
 LINKS_FILE = "links.txt"
@@ -222,7 +213,7 @@ with st.sidebar:
 
     with tabs[2]:
         st.subheader("🎨 Color Gradient")
-        default_grad = db.get('color_gradient', ["#7030A0", "#E31C79", "#FF6B9D", "#FFA500", "#FFD700", "#87CEEB", "#4169E1"])
+        default_grad = DEFAULT_COLOR_GRADIENT
         st.session_state.color_gradient = dynamic_color_list(
             "gradient", 
             "Year Color Gradient", 
@@ -258,21 +249,22 @@ with st.sidebar:
             st.session_state.sol_title_color = st.color_picker("Title Color", value="#000000", key="sol_t_c")
             st.session_state.sol_title_bg = st.toggle("Draw Background Box", key="sol_t_bg")
 
-    # Update db with all settings
-    db.update({
+    # Build this session's settings. Kept in st.session_state (per user) and
+    # passed explicitly into utils functions, never written to a shared global.
+    st.session_state.design_settings = {
         "ink_saving_mode": ink_mode,
         "card_draw_border": border_mode,
         "card_background_color": "#FFFFFF" if ink_mode else qr_bg_color,
         "google_font": google_font,
-        "color_gradient": st.session_state.get('color_gradient', db.get('color_gradient')),
-        
+        "color_gradient": st.session_state.get('color_gradient', DEFAULT_COLOR_GRADIENT),
+
         "qr_bg_type": qr_bg_type,
         "qr_bg_color": qr_bg_color,
         "qr_bg_image": st.session_state.get('qr_bg_img'),
         "qr_bg_scale": st.session_state.get('qr_scale', 1.0),
         "qr_bg_offset_x": st.session_state.get('qr_x', 0.0),
         "qr_bg_offset_y": st.session_state.get('qr_y', 0.0),
-        "neon_colors": st.session_state.get('neon_colors', db.get('neon_colors')),
+        "neon_colors": st.session_state.get('neon_colors', utils.DEFAULT_DESIGN_SETTINGS['neon_colors']),
         "neon_ring_thickness": st.session_state.get('neon_thick', 12),
         "neon_ring_count": st.session_state.get('neon_count', 8),
         "qr_background_mode": qr_bg_mode,
@@ -300,7 +292,7 @@ with st.sidebar:
         "sol_title_size": st.session_state.get('sol_t_s', 80),
         "sol_title_color": st.session_state.get('sol_title_color', "#000000"),
         "sol_title_bg": st.session_state.get('sol_t_bg', False),
-    })
+    }
 with st.expander("Disclaimer, Accuracy & Support"):
     st.info("""
     **Why are some years wrong?**
@@ -469,18 +461,20 @@ if songs:
     if not valid_preview_years:
         valid_preview_years = [2000]
 
+    settings = st.session_state.get('design_settings')
+
     pcol1, pcol2 = st.columns(2)
     with pcol1:
         st.caption("QR Side")
         link_str = str(preview_song['Link']) if pd.notna(preview_song['Link']) else "https://open.spotify.com/"
         qr_img = utils.create_qr_code(link_str)
-        qr_card = utils.create_qr_with_neon_rings_in_memory(qr_img, seed=hash(link_str))
+        qr_card = utils.create_qr_with_neon_rings_in_memory(qr_img, seed=hash(link_str), settings_override=settings)
         st.image(qr_card, use_container_width=True)
     with pcol2:
         st.caption("Solution Side")
         sol_card = utils.create_solution_side_in_memory(
-            str(preview_song['Song']), str(preview_song['Artist']), 
-            preview_year, valid_preview_years
+            str(preview_song['Song']), str(preview_song['Artist']),
+            preview_year, valid_preview_years, settings_override=settings
         )
         st.image(sol_card, use_container_width=True)
 
@@ -511,7 +505,7 @@ if songs:
 
         with st.status("Generating cards...", expanded=True) as status:
             progress_bar = st.progress(0, text="Starting PDF generation...")
-            pdf_data = utils.create_pdf_in_memory(songs, progress_bar)
+            pdf_data = utils.create_pdf_in_memory(songs, progress_bar, settings_override=st.session_state.get('design_settings'))
             status.update(label="✅ All Cards Generated!", state="complete")
             progress_bar.empty()
 
