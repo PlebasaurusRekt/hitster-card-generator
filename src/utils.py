@@ -1,4 +1,5 @@
 import io
+import gc
 import time
 import os
 import random
@@ -28,7 +29,17 @@ DEFAULT_DESIGN_SETTINGS = {
     "card_draw_border": False,
     "card_border_color": (255, 255, 255),
     "neon_colors": [(255, 0, 100), (0, 200, 255), (0, 255, 120), (255, 255, 0)],
-    
+
+    "fonts_dict": {
+        "year": os.path.join("fonts", "Montserrat-Bold.ttf"),
+        "artist": os.path.join("fonts", "Montserrat-SemiBold.ttf"),
+        "song": os.path.join("fonts", "Montserrat-MediumItalic.ttf"),
+    },
+    "color_gradient": [
+        "#7030A0", "#E31C79", "#FF6B9D", "#FFA500",
+        "#FFD700", "#87CEEB", "#4169E1",
+    ],
+
     "google_font": "Montserrat",
 
     # QR Side Settings
@@ -405,33 +416,37 @@ def create_qr_with_neon_rings(qr_code, output_path):
     return output_path
 
 
-def get_year_color(year, all_years):
+def get_year_color(year, all_years, settings=None):
     """
     Get color for a year based on its percentile in the distribution.
     """
+    if settings is None:
+        settings = get_settings()
+    gradient = settings.get('color_gradient', [])
+
     sorted_years = sorted(all_years)
-    
+
     # Calculate percentile position
     count_below = sum(1 for y in sorted_years if y < year)
     count_equal = sum(1 for y in sorted_years if y == year)
     percentile = (count_below + count_equal / 2) / len(sorted_years)
-    
-    n_colors = len(db.get('color_gradient', []))
+
+    n_colors = len(gradient)
     if n_colors == 0:
         return (0.0, 0.0, 0.0) # Fallback to black if no colors
     if n_colors == 1:
-        return mcolors.to_rgba(db['color_gradient'][0])[:3]
-        
+        return mcolors.to_rgba(gradient[0])[:3]
+
     idx = percentile * (n_colors - 1)
     idx_low = int(np.floor(idx))
     idx_high = int(np.ceil(idx))
-    
+
     if idx_low == idx_high:
-        return mcolors.to_rgba(db['color_gradient'][idx_low])[:3]
-    
+        return mcolors.to_rgba(gradient[idx_low])[:3]
+
     # Linear interpolation
-    color_low = mcolors.to_rgba(db['color_gradient'][idx_low])
-    color_high = mcolors.to_rgba(db['color_gradient'][idx_high])
+    color_low = mcolors.to_rgba(gradient[idx_low])
+    color_high = mcolors.to_rgba(gradient[idx_high])
     frac = idx - idx_low
     
     r = color_low[0] + (color_high[0] - color_low[0]) * frac
@@ -497,7 +512,7 @@ def get_google_font(family_name, size, fallback_font):
 def get_font_for_setting(settings, size):
     """Get the preferred font (Google Font or fallback) for a given size."""
     try:
-        fallback = ImageFont.truetype(db['fonts_dict']['artist'], size)
+        fallback = ImageFont.truetype(settings['fonts_dict']['artist'], size)
     except:
         fallback = ImageFont.load_default()
         
@@ -843,11 +858,12 @@ def create_qr_with_neon_rings_in_memory(qr_code, seed=42, settings_override=None
         
     return img
 
-def create_solution_side_in_memory(song_name, artist, year, all_years):
+def create_solution_side_in_memory(song_name, artist, year, all_years, settings_override=None):
     """
     Create solution card and return the PIL Image object directly.
+    settings_override: dict of settings to override defaults.
     """
-    settings = get_settings()
+    settings = get_settings(settings_override)
     size = settings['card_size']
     margin = 150
     max_width = size - (2 * margin)
@@ -863,7 +879,7 @@ def create_solution_side_in_memory(song_name, artist, year, all_years):
     effective_year = year if year is not None else int(np.median(valid_years))
 
     # Get color for this year
-    color_rgb = get_year_color(effective_year, valid_years)
+    color_rgb = get_year_color(effective_year, valid_years, settings)
     color_int = tuple(int(c * 255) for c in color_rgb)
     
     # Create the base image
@@ -1007,11 +1023,11 @@ def fetch_no_api_data_from_list(urls, progress_bar=None):
 
     return songs
 
-def create_pdf_in_memory(songs, progress_bar=None):
+def create_pdf_in_memory(songs, progress_bar=None, settings_override=None):
     if not songs:
         return None
-    
-    settings = get_settings()
+
+    settings = get_settings(settings_override)
 
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
@@ -1026,7 +1042,7 @@ def create_pdf_in_memory(songs, progress_bar=None):
     total_cards = len(songs)
     years = [song['year'] for song in songs]
 
-    card_label = db.get('card_label', None)
+    card_label = settings.get('card_label', None)
 
     for i in range(0, total_cards, 20):
         batch_songs = list(songs[i:i+20])
@@ -1047,16 +1063,19 @@ def create_pdf_in_memory(songs, progress_bar=None):
             x = margin_x + col * card_size
             y = height - margin_y - (row + 1) * card_size
             
-            base_qr = create_qr_code(song['link']) 
+            base_qr = create_qr_code(song['link'])
             # Per-card unique ring pattern based on link hash
-            qr_pil = create_qr_with_neon_rings_in_memory(base_qr, seed=hash(song['link'])) 
-            
+            qr_pil = create_qr_with_neon_rings_in_memory(base_qr, seed=hash(song['link']), settings_override=settings)
+
             img_byte_arr = io.BytesIO()
             qr_pil.save(img_byte_arr, format='PNG')
             img_byte_arr.seek(0)
-            
+
             c.drawImage(ImageReader(img_byte_arr), x, y, width=card_size, height=card_size)
-        
+
+            # Free the per-card rasters; otherwise peak memory grows with playlist size.
+            del base_qr, qr_pil, img_byte_arr
+
         c.showPage()
 
         # --- PAGE 2: BACK (SOLUTIONS - MIRRORED) ---
@@ -1072,19 +1091,25 @@ def create_pdf_in_memory(songs, progress_bar=None):
             y = height - margin_y - (row + 1) * card_size
             
             sol_pil = create_solution_side_in_memory(
-                song['name'], song['artist'], song['year'], years
-            ) 
+                song['name'], song['artist'], song['year'], years, settings_override=settings
+            )
+
             sol_byte_arr = io.BytesIO()
             sol_pil.save(sol_byte_arr, format='PNG')
             sol_byte_arr.seek(0)
-            
+
             c.drawImage(ImageReader(sol_byte_arr), x, y, width=card_size, height=card_size)
+
+            del sol_pil, sol_byte_arr
 
         if progress_bar:
             processed = min(i + 20, total_cards)
             percent = processed / total_cards
             progress_bar.progress(percent, text=f"Generated {processed}/{total_cards} cards...")
         c.showPage()
+
+        # Reclaim the batch's rasters before building the next page.
+        gc.collect()
 
     c.save()
     pdf_data = buffer.getvalue()
