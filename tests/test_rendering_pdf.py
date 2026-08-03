@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from PIL import Image
+from PIL import Image, ImageChops, ImageDraw
 
 import src.utils as utils
 
@@ -15,6 +15,10 @@ TRACK_URL = (
 
 
 class RenderingTests(unittest.TestCase):
+    @staticmethod
+    def _ink_bbox(image, background):
+        return ImageChops.difference(image, background).getbbox()
+
     def test_qr_has_no_embedded_quiet_zone(self):
         qr = utils.create_qr_code(TRACK_URL)
         module_count = qr.info["qr_module_count"]
@@ -124,6 +128,143 @@ class RenderingTests(unittest.TestCase):
         self.assertLessEqual(
             len(utils._google_font_cache),
             utils.FONT_CACHE_MAX_ENTRIES,
+        )
+
+    def test_solution_text_blocks_keep_exact_edge_offsets_when_wrapped(self):
+        size = 2000
+        edge_offset = utils.card_distance_cm_to_pixels(
+            size, utils.SONG_TEXT_EDGE_OFFSET_CM
+        )
+        settings = utils.get_settings({"google_font": ""})
+        font = utils.get_font_for_setting(
+            settings, 155, role="artist", weight=500
+        )
+
+        for edge, edge_y in (
+            ("top", edge_offset),
+            ("bottom", size - edge_offset),
+        ):
+            background = Image.new("RGB", (size, size), "white")
+            image = background.copy()
+            utils.draw_centered_text_at_edge(
+                ImageDraw.Draw(image),
+                "First wrapped line\nSecond wrapped line",
+                font,
+                size / 2,
+                edge_y,
+                edge,
+            )
+            bbox = self._ink_bbox(image, background)
+            self.assertIsNotNone(bbox)
+            if edge == "top":
+                self.assertEqual(bbox[1], edge_offset)
+            else:
+                self.assertEqual(bbox[3], size - edge_offset)
+
+    def test_solution_title_and_card_numbers_keep_physical_offsets(self):
+        size = 2000
+        settings = utils.get_settings({
+            "card_size": size,
+            "google_font": "",
+            "sol_title_enabled": True,
+            "sol_title": "HITSTER",
+            "sol_title_color": (255, 255, 255),
+            "sol_title_opacity": 100,
+        })
+        background = Image.new("RGB", (size, size), "black")
+
+        title_image = background.copy()
+        utils.render_game_title(title_image, settings, side="sol")
+        title_bbox = self._ink_bbox(title_image, background)
+        self.assertEqual(
+            title_bbox[:2],
+            (
+                utils.card_distance_cm_to_pixels(
+                    size, utils.SOLUTION_TITLE_LEFT_OFFSET_CM
+                ),
+                utils.card_distance_cm_to_pixels(
+                    size, utils.SOLUTION_TITLE_TOP_OFFSET_CM
+                ),
+            ),
+        )
+
+        expected_right = utils.card_distance_cm_to_pixels(
+            size, utils.CARD_NUMBER_RIGHT_OFFSET_CM
+        )
+        expected_bottom = utils.card_distance_cm_to_pixels(
+            size, utils.CARD_NUMBER_BOTTOM_OFFSET_CM
+        )
+        for side in ("qr", "sol"):
+            number_image = background.copy()
+            utils.render_card_number(
+                number_image, 123, settings, side=side
+            )
+            number_bbox = self._ink_bbox(number_image, background)
+            self.assertEqual(size - number_bbox[2], expected_right)
+            self.assertEqual(size - number_bbox[3], expected_bottom)
+
+    def test_reference_song_has_requested_capital_to_year_gaps(self):
+        size = 2000
+        settings = utils.get_settings({"google_font": ""})
+        self.assertEqual(
+            settings["song_year_size"], utils.DEFAULT_SONG_YEAR_SIZE
+        )
+        background = Image.new("RGB", (size, size), "white")
+        edge_offset = utils.card_distance_cm_to_pixels(
+            size, utils.SONG_TEXT_EDGE_OFFSET_CM
+        )
+        center = size / 2
+
+        font_artist = utils.get_font_for_setting(
+            settings, settings["song_artist_size"], role="artist",
+            weight=settings["song_artist_font_weight"],
+        )
+        artist_bbox = ImageDraw.Draw(background).multiline_textbbox(
+            (0, 0), "Miley Cyrus", font=font_artist, align="center"
+        )
+        capital_m = background.copy()
+        ImageDraw.Draw(capital_m).text(
+            (0, edge_offset - artist_bbox[1]), "M",
+            fill="black", font=font_artist,
+        )
+        capital_m_bbox = self._ink_bbox(capital_m, background)
+
+        font_title = utils.get_font_for_setting(
+            settings, settings["song_title_size"], role="song",
+            italic=True, weight=settings["song_title_font_weight"],
+        )
+        title_bbox = ImageDraw.Draw(background).multiline_textbbox(
+            (0, 0), "Wrecking Ball", font=font_title, align="center"
+        )
+        capital_w = background.copy()
+        ImageDraw.Draw(capital_w).text(
+            (0, size - edge_offset - title_bbox[3]), "W",
+            fill="black", font=font_title,
+        )
+        capital_w_bbox = self._ink_bbox(capital_w, background)
+
+        year_image = background.copy()
+        font_year = utils.get_font_for_setting(
+            settings, settings["song_year_size"], role="year",
+            weight=settings["song_year_font_weight"],
+        )
+        ImageDraw.Draw(year_image).text(
+            (center, center), "2013", fill="black",
+            font=font_year, anchor="mm",
+        )
+        year_bbox = self._ink_bbox(year_image, background)
+
+        artist_gap_cm = (
+            year_bbox[1] - capital_m_bbox[3]
+        ) * utils.CARD_PHYSICAL_SIZE_CM / size
+        title_gap_cm = (
+            capital_w_bbox[1] - year_bbox[3]
+        ) * utils.CARD_PHYSICAL_SIZE_CM / size
+        self.assertAlmostEqual(
+            artist_gap_cm, utils.SONG_ARTIST_TO_YEAR_GAP_CM, places=1
+        )
+        self.assertAlmostEqual(
+            title_gap_cm, utils.SONG_YEAR_TO_TITLE_GAP_CM, places=1
         )
 
 

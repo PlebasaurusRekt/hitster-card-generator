@@ -12,7 +12,7 @@ class StreamlitSmokeTests(unittest.TestCase):
         with patch.object(utils, "UTILS_API_VERSION", 0):
             app = AppTest.from_file(str(app_path), default_timeout=30)
             app.run()
-            self.assertEqual(utils.UTILS_API_VERSION, 2)
+            self.assertEqual(utils.UTILS_API_VERSION, 3)
 
         self.assertEqual(list(app.exception), [])
 

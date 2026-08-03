@@ -38,7 +38,7 @@ from src.input_validation import (
     MAX_TRACK_LINKS, InputValidationError, canonicalize_spotify_url,
 )
 
-UTILS_API_VERSION = 2
+UTILS_API_VERSION = 3
 CARD_PHYSICAL_SIZE_CM = 6.5
 DEFAULT_QR_CODE_SIZE_CM = 2.5
 DEFAULT_QR_BORDER_CM = 0.1
@@ -52,6 +52,12 @@ SOLUTION_TITLE_TOP_OFFSET_CM = 0.3
 SOLUTION_TITLE_LEFT_OFFSET_CM = 0.2
 CARD_NUMBER_RIGHT_OFFSET_CM = 0.3
 CARD_NUMBER_BOTTOM_OFFSET_CM = 0.2
+SONG_ARTIST_TO_YEAR_GAP_CM = 1.4
+SONG_YEAR_TO_TITLE_GAP_CM = 1.3
+# At the 2000 px preview resolution, this keeps a centered Montserrat year
+# at the requested distances from the capital M in "Miley Cyrus" and the
+# capital W in "Wrecking Ball". PDF rendering scales the value with the card.
+DEFAULT_SONG_YEAR_SIZE = 492
 
 
 def card_distance_cm_to_pixels(card_size, distance_cm):
@@ -187,7 +193,7 @@ DEFAULT_DESIGN_SETTINGS = {
     "sol_color_wash_grain_opacity": 0.012,
     "sol_border_width": 142,
 
-    "song_year_size": 570,
+    "song_year_size": DEFAULT_SONG_YEAR_SIZE,
     "song_artist_size": 155,
     "song_title_size": 155,
     "card_number_size": 70,
@@ -2036,7 +2042,9 @@ def create_solution_side_in_memory(
     draw = ImageDraw.Draw(img)
     
     font_year = get_font_for_setting(
-        settings, settings.get('song_year_size', 570), role="year",
+        settings, settings.get(
+            'song_year_size', DEFAULT_SONG_YEAR_SIZE
+        ), role="year",
         weight=settings.get('song_year_font_weight', 700),
     )
     font_artist = get_font_for_setting(

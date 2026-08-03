@@ -7,7 +7,7 @@ import pandas as pd
 import src.input_validation as input_validation
 import src.utils as utils
 
-EXPECTED_UTILS_API_VERSION = 2
+EXPECTED_UTILS_API_VERSION = 3
 if getattr(utils, 'UTILS_API_VERSION', 0) < EXPECTED_UTILS_API_VERSION:
     utils = importlib.reload(utils)
 
@@ -550,7 +550,10 @@ with st.sidebar:
         st.session_state.sol_border_width = st.slider("Ink Saving Border Thickness", 10, 500, 142, key="sol_bw")
 
         st.subheader("🔤 Song Text")
-        st.session_state.song_year_size = st.slider("Song Year Font Size", 20, 800, 570, key="song_year_font_size")
+        st.session_state.song_year_size = st.slider(
+            "Song Year Font Size", 20, 800,
+            utils.DEFAULT_SONG_YEAR_SIZE, key="song_year_font_size"
+        )
         st.session_state.song_artist_size = st.slider("Song Artist Font Size", 20, 500, 155, key="song_artist_font_size")
         st.session_state.song_title_size = st.slider("Song Title Font Size", 20, 500, 155, key="song_title_font_size")
         st.session_state.card_number_size = st.slider("Card Number Font Size", 10, 200, 70, key="card_number_font_size")
@@ -611,7 +614,9 @@ with st.sidebar:
         "sol_bg_offset_y": st.session_state.get('sol_y', 0.0),
         "sol_color_wash_enabled": sol_color_wash_enabled,
         "sol_border_width": st.session_state.get('sol_bw', 142),
-        "song_year_size": st.session_state.get('song_year_font_size', 570),
+        "song_year_size": st.session_state.get(
+            'song_year_font_size', utils.DEFAULT_SONG_YEAR_SIZE
+        ),
         "song_artist_size": st.session_state.get('song_artist_font_size', 155),
         "song_title_size": st.session_state.get('song_title_font_size', 155),
         "card_number_size": st.session_state.get('card_number_font_size', 70),
