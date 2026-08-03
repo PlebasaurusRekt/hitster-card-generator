@@ -91,12 +91,18 @@ def generate_hitster_cards(db, playlist_url=None, client_id=None, client_secret=
     print(f"\nStep 2: Generating {len(songs)} cards...")
     release_years = [song['year'] for song in songs]
     for i, song in enumerate(songs):
-        qr_path = os.path.join(full_output_path, f"card_{i+1:03d}_qr.png")
-        sol_path = os.path.join(full_output_path, f"card_{i+1:03d}_solution.png")
+        card_number = int(db.get('card_number_start', 1)) + i
+        qr_path = os.path.join(full_output_path, f"card_{card_number:03d}_qr.png")
+        sol_path = os.path.join(
+            full_output_path, f"card_{card_number:03d}_solution.png"
+        )
         
         qr_code = utils.create_qr_code(song['link'])
-        utils.create_qr_with_neon_rings(qr_code, qr_path)
-        utils.create_solution_side(song['name'], song['artist'], song['year'], release_years, sol_path, card_label=card_label)
+        utils.create_qr_with_neon_rings(qr_code, qr_path, card_number=card_number)
+        utils.create_solution_side(
+            song['name'], song['artist'], song['year'], release_years, sol_path,
+            card_number=card_number
+        )
         if (i + 1) % 20 == 0:
             print(f"  Progress: {i+1}/{len(songs)}...")
 
@@ -115,6 +121,7 @@ if __name__ == "__main__":
     parser.add_argument('--ink-save-mode', action='store_true', default=None, help='if set, print the qr cards in ink saving mode (white background, black qr code)')
     parser.add_argument('--card-draw-border', action='store_true', default=None, help='if set, draw border around the qr cards for easier cutting')
     parser.add_argument('--card-label', default=None, help='Add a small label to each card (e.g., event name or playlist identifier)')
+    parser.add_argument('--start-number', type=int, default=None, help='First card number (default: 1)')
     parser.add_argument('--qr-bg-mode', choices=['transparent', 'solid'], default=None)
     parser.add_argument('--qr-bg-color', default=None)
     parser.add_argument('--qr-module-color', default=None)
@@ -131,11 +138,14 @@ if __name__ == "__main__":
     INK_SAVING_MODE = os.getenv("INK_SAVING_MODE", "False").lower() == "true"
     CARD_DRAW_BORDER = os.getenv("CARD_DRAW_BORDER", "False").lower() == "true"
     CARD_LABEL = os.getenv("CARD_LABEL", None)
+    CARD_START_NUMBER = int(os.getenv("CARD_START_NUMBER", "1"))
     
     QR_BG_MODE = os.getenv("QR_BG_MODE", "solid")
-    QR_BG_COLOR = os.getenv("QR_BG_COLOR", "#FFFFFF")
-    QR_MODULE_COLOR = os.getenv("QR_MODULE_COLOR", "#000000")
-    QR_SIZE_RATIO = float(os.getenv("QR_SIZE_RATIO", "0.45"))
+    QR_BG_COLOR = os.getenv("QR_BG_COLOR", "#000000")
+    QR_MODULE_COLOR = os.getenv("QR_MODULE_COLOR", "#FFFFFF")
+    QR_SIZE_RATIO = float(os.getenv(
+        "QR_SIZE_RATIO", str(utils.DEFAULT_QR_SIZE_RATIO)
+    ))
     BG_TYPE = os.getenv("BG_TYPE", "neon_rings")
     GAME_TITLE = os.getenv("GAME_TITLE", "")
     GAME_TITLE_POS = os.getenv("GAME_TITLE_POS", "top")
@@ -143,12 +153,18 @@ if __name__ == "__main__":
     ink_save_mode = args.ink_save_mode if args.ink_save_mode is not None else INK_SAVING_MODE
     card_draw_border = args.card_draw_border if args.card_draw_border is not None else CARD_DRAW_BORDER
     card_label = args.card_label if args.card_label is not None else CARD_LABEL
+    card_number_start = (
+        args.start_number if args.start_number is not None else CARD_START_NUMBER
+    )
+    if card_number_start < 1:
+        parser.error("--start-number must be at least 1")
 
     db['ink_saving_mode'] = ink_save_mode
     db['card_draw_border'] = card_draw_border
     db['card_background_color'] = 'white' if ink_save_mode else 'black'
     db['card_border_color'] = 'black' if ink_save_mode else 'white'
     db['card_label'] = card_label
+    db['card_number_start'] = card_number_start
     
     db['qr_background_mode'] = args.qr_bg_mode if args.qr_bg_mode is not None else QR_BG_MODE
     db['qr_background_color'] = args.qr_bg_color if args.qr_bg_color is not None else QR_BG_COLOR

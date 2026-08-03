@@ -1,10 +1,15 @@
 import io
 import gc
+import colorsys
+import math
 import time
 import os
 import random
+import secrets
+import threading
 import textwrap
 import re
+import zlib
 import qrcode
 import requests
 import numpy as np
@@ -18,6 +23,40 @@ from reportlab.lib.utils import ImageReader
 from reportlab.lib.units import cm
 db = None
 _font_cache = None
+
+CARD_PHYSICAL_SIZE_CM = 6.5
+DEFAULT_QR_CODE_SIZE_CM = 2.5
+DEFAULT_QR_BORDER_CM = 0.1
+DEFAULT_QR_TOTAL_SIZE_CM = (
+    DEFAULT_QR_CODE_SIZE_CM + 2 * DEFAULT_QR_BORDER_CM
+)
+DEFAULT_QR_SIZE_RATIO = DEFAULT_QR_CODE_SIZE_CM / CARD_PHYSICAL_SIZE_CM
+NEON_RING_EDGE_CLEARANCE_CM = 0.3
+SONG_TEXT_EDGE_OFFSET_CM = 0.9
+SOLUTION_TITLE_TOP_OFFSET_CM = 0.3
+SOLUTION_TITLE_LEFT_OFFSET_CM = 0.2
+CARD_NUMBER_RIGHT_OFFSET_CM = 0.3
+CARD_NUMBER_BOTTOM_OFFSET_CM = 0.2
+
+
+def card_distance_cm_to_pixels(card_size, distance_cm):
+    """Convert a physical card distance in centimeters to raster pixels."""
+    return round(card_size * distance_cm / CARD_PHYSICAL_SIZE_CM)
+
+
+def get_qr_code_size_pixels(settings):
+    """Return the QR raster side length for the current card resolution."""
+    return max(1, round(settings['card_size'] * settings['qr_size_ratio']))
+
+
+def get_qr_backplate_padding_pixels(settings):
+    """Return the physical QR border width, with pixel-setting compatibility."""
+    padding_cm = settings.get('qr_backplate_padding_cm')
+    if padding_cm is not None:
+        return max(0, card_distance_cm_to_pixels(
+            settings['card_size'], padding_cm
+        ))
+    return max(0, int(settings.get('qr_backplate_padding', 0)))
 
 
 def to_rgba(color):
@@ -61,6 +100,7 @@ DEFAULT_DESIGN_SETTINGS = {
     "ink_saving_mode": False,
     "card_draw_border": False,
     "card_border_color": (255, 255, 255),
+    "card_number_start": 1,
     "neon_colors": [(255, 0, 100), (0, 200, 255), (0, 255, 120), (255, 255, 0)],
 
     "fonts_dict": {
@@ -74,6 +114,11 @@ DEFAULT_DESIGN_SETTINGS = {
     ],
 
     "google_font": "Montserrat",
+    "card_number_font_weight": 600,
+    "card_set_title_font_weight": 500,
+    "song_artist_font_weight": 500,
+    "song_year_font_weight": 700,
+    "song_title_font_weight": 300,
 
     # QR Side Settings
     "qr_bg_type": "neon_rings", # "solid", "neon_rings", "image"
@@ -83,17 +128,18 @@ DEFAULT_DESIGN_SETTINGS = {
     "qr_bg_offset_x": 0.0,
     "qr_bg_offset_y": 0.0,
     
-    "qr_background_mode": "transparent", # "transparent" or "solid"
+    "qr_background_mode": "solid", # "transparent" or "solid"
     "qr_background_color": (0, 0, 0), # solid backplate color
     "qr_module_color": (255, 255, 255),
     "qr_quiet_zone": 2, 
-    "qr_backplate_padding": 40,
+    "qr_backplate_padding": 0,
+    "qr_backplate_padding_cm": DEFAULT_QR_BORDER_CM,
     "qr_backplate_radius": 20,
-    "qr_size_ratio": 0.45,
+    "qr_size_ratio": DEFAULT_QR_SIZE_RATIO,
     
     "neon_ring_opacity": 1.0,
     "neon_ring_thickness": 12,
-    "neon_ring_count": 8,
+    "neon_ring_count": 14,
     
     "qr_title": "",
     "qr_title_enabled": False,
@@ -101,6 +147,7 @@ DEFAULT_DESIGN_SETTINGS = {
     "qr_title_size": 80,
     "qr_title_color": (255, 255, 255),
     "qr_title_bg": False,
+    "qr_card_number_opacity": 42,
 
     # Solution Side Settings
     "sol_bg_type": "gradient", # "gradient", "image"
@@ -108,25 +155,44 @@ DEFAULT_DESIGN_SETTINGS = {
     "sol_bg_scale": 1.0,
     "sol_bg_offset_x": 0.0,
     "sol_bg_offset_y": 0.0,
+    "sol_color_wash_enabled": True,
+    "sol_color_wash_grain_opacity": 0.012,
+    "sol_border_width": 142,
+
+    "song_year_size": 570,
+    "song_artist_size": 155,
+    "song_title_size": 155,
+    "card_number_size": 70,
 
     "sol_title": "",
     "sol_title_enabled": False,
-    "sol_title_pos": "top", # "top", "bottom"
-    "sol_title_size": 80,
-    "sol_title_color": (0, 0, 0),
+    "sol_title_pos": "in_border_top_left",
+    "sol_title_size": 140,
+    "sol_title_color": (255, 255, 255),
+    "sol_title_opacity": 60,
     "sol_title_bg": False,
 }
 
 def get_settings(override=None):
     """Get settings merged with defaults."""
     settings = DEFAULT_DESIGN_SETTINGS.copy()
+    provided_settings = {}
     if db:
-        settings.update(db)
+        provided_settings.update(db)
     if override:
-        settings.update(override)
-    
+        provided_settings.update(override)
+    settings.update(provided_settings)
+    if (
+        'qr_backplate_padding' in provided_settings
+        and 'qr_backplate_padding_cm' not in provided_settings
+    ):
+        settings['qr_backplate_padding_cm'] = None
     # Ensure colors are tuples if they came as strings
-    for key in ["card_border_color", "qr_bg_color", "qr_background_color", "qr_module_color", "qr_title_color", "sol_title_color"]:
+    for key in [
+        "card_border_color", "qr_bg_color", "qr_background_color",
+        "qr_module_color", "qr_title_color", "sol_title_color",
+        "sol_color_wash_base_color",
+    ]:
         if isinstance(settings.get(key), str):
             try:
                 settings[key] = tuple(int(c * 255) for c in to_rgba(settings[key]))
@@ -280,67 +346,232 @@ def fetch_no_api_data(links_file):
 # SPOTIFY API FUNCTIONS
 # =============================================================================
 
-def fetch_spotify_playlist(playlist_url, client_id, client_secret):
-    """
-    Fetch all tracks from a Spotify playlist (handles pagination).
-    
-    Args:
-        playlist_url: Full Spotify playlist URL
-        client_id: Spotify API client ID
-        client_secret: Spotify API client secret
-        
-    Returns:
-        dict: Complete playlist data with all tracks
-    """
-    # Extract playlist ID
-    playlist_id = playlist_url.split('/playlist/')[1].split('?')[0]
-    
-    # Get access token
-    auth_response = requests.post('https://accounts.spotify.com/api/token', {
-        'grant_type': 'client_credentials',
-        'client_id': client_id,
-        'client_secret': client_secret,
-    })
-    access_token = auth_response.json()['access_token']
-    
-    headers = {'Authorization': f'Bearer {access_token}'}
+class SpotifyAPIError(RuntimeError):
+    """Raised when Spotify authentication or playlist access fails."""
 
-    # Fetch playlist metadata (name only — the embedded `tracks` object was
-    # removed from this endpoint by Spotify, so we paginate via /tracks below)
-    meta_response = requests.get(
-        f'https://api.spotify.com/v1/playlists/{playlist_id}?fields=name',
-        headers=headers,
-    )
-    meta = meta_response.json()
-    playlist_name = meta.get('name', 'Unknown')
+
+SPOTIFY_OAUTH_SCOPES = (
+    'playlist-read-private',
+    'playlist-read-collaborative',
+)
+SPOTIFY_OAUTH_PENDING_TTL_SECONDS = 10 * 60
+_spotify_oauth_pending = {}
+_spotify_oauth_lock = threading.Lock()
+
+
+def _purge_expired_spotify_oauth_requests():
+    """Remove expired OAuth attempts. Caller must hold the OAuth lock."""
+    cutoff = time.time() - SPOTIFY_OAUTH_PENDING_TTL_SECONDS
+    for state, details in list(_spotify_oauth_pending.items()):
+        if details['created_at'] < cutoff:
+            del _spotify_oauth_pending[state]
+
+
+def begin_spotify_oauth(client_id, client_secret, redirect_uri):
+    """Register an OAuth attempt and return Spotify's authorization URL."""
+    client_id = str(client_id).strip()
+    client_secret = str(client_secret).strip()
+    redirect_uri = str(redirect_uri).strip()
+    if not client_id or not client_secret:
+        raise SpotifyAPIError("Enter both Spotify credentials first.")
+
+    parsed_redirect = urllib.parse.urlparse(redirect_uri)
+    is_loopback = parsed_redirect.hostname in ('127.0.0.1', '::1')
+    if not (
+        parsed_redirect.scheme == 'https'
+        or (parsed_redirect.scheme == 'http' and is_loopback)
+    ):
+        raise SpotifyAPIError(
+            "The redirect URI must use HTTPS, or HTTP with 127.0.0.1/::1."
+        )
+
+    state = secrets.token_urlsafe(32)
+    with _spotify_oauth_lock:
+        _purge_expired_spotify_oauth_requests()
+        _spotify_oauth_pending[state] = {
+            'client_id': client_id,
+            'client_secret': client_secret,
+            'redirect_uri': redirect_uri,
+            'created_at': time.time(),
+        }
+
+    query = urllib.parse.urlencode({
+        'client_id': client_id,
+        'response_type': 'code',
+        'redirect_uri': redirect_uri,
+        'state': state,
+        'scope': ' '.join(SPOTIFY_OAUTH_SCOPES),
+    })
+    return f'https://accounts.spotify.com/authorize?{query}'
+
+
+def discard_spotify_oauth(state):
+    """Discard a denied or abandoned OAuth request."""
+    if not state:
+        return
+    with _spotify_oauth_lock:
+        _spotify_oauth_pending.pop(str(state), None)
+
+
+def complete_spotify_oauth(code, state):
+    """Exchange a Spotify callback code for user and refresh tokens."""
+    with _spotify_oauth_lock:
+        _purge_expired_spotify_oauth_requests()
+        pending = _spotify_oauth_pending.pop(str(state), None)
+    if pending is None:
+        raise SpotifyAPIError(
+            "Spotify login expired or its security state did not match. Start again."
+        )
+
+    try:
+        response = requests.post(
+            'https://accounts.spotify.com/api/token',
+            data={
+                'grant_type': 'authorization_code',
+                'code': code,
+                'redirect_uri': pending['redirect_uri'],
+            },
+            auth=(pending['client_id'], pending['client_secret']),
+            timeout=15,
+        )
+    except requests.RequestException as exc:
+        raise SpotifyAPIError(
+            "Spotify's token service could not be reached."
+        ) from exc
+    if not response.ok:
+        raise SpotifyAPIError(
+            f"Spotify login could not be completed (HTTP {response.status_code})."
+        )
+
+    payload = response.json()
+    access_token = payload.get('access_token')
+    refresh_token = payload.get('refresh_token')
+    if not access_token or not refresh_token:
+        raise SpotifyAPIError(
+            "Spotify did not return the required user and refresh tokens."
+        )
+    return {
+        'access_token': access_token,
+        'refresh_token': refresh_token,
+        'expires_at': time.time() + int(payload.get('expires_in', 3600)),
+        'scope': payload.get('scope', ''),
+        'client_id': pending['client_id'],
+        'client_secret': pending['client_secret'],
+    }
+
+
+def get_spotify_access_token(auth):
+    """Return a valid user token, refreshing it when nearly expired."""
+    if not isinstance(auth, dict) or not auth.get('access_token'):
+        raise SpotifyAPIError("Connect your Spotify account first.")
+    if float(auth.get('expires_at', 0)) > time.time() + 60:
+        return auth['access_token']
+
+    refresh_token = auth.get('refresh_token')
+    if not refresh_token:
+        raise SpotifyAPIError("Spotify login expired. Connect again.")
+    try:
+        response = requests.post(
+            'https://accounts.spotify.com/api/token',
+            data={
+                'grant_type': 'refresh_token',
+                'refresh_token': refresh_token,
+            },
+            auth=(auth['client_id'], auth['client_secret']),
+            timeout=15,
+        )
+    except requests.RequestException as exc:
+        raise SpotifyAPIError(
+            "Spotify's token service could not be reached."
+        ) from exc
+    if not response.ok:
+        raise SpotifyAPIError(
+            "Spotify login expired or was revoked. Connect again."
+        )
+
+    payload = response.json()
+    auth['access_token'] = payload['access_token']
+    auth['expires_at'] = time.time() + int(payload.get('expires_in', 3600))
+    if payload.get('refresh_token'):
+        auth['refresh_token'] = payload['refresh_token']
+    return auth['access_token']
+
+
+def fetch_spotify_playlist_with_token(playlist_url, access_token):
+    """Fetch every item in an owned/collaborative playlist with user OAuth."""
+    try:
+        playlist_id = playlist_url.split('/playlist/')[1].split('?')[0]
+    except (IndexError, AttributeError) as exc:
+        raise SpotifyAPIError("Invalid Spotify playlist URL.") from exc
+
+    headers = {'Authorization': f'Bearer {access_token}'}
+    try:
+        meta_response = requests.get(
+            f'https://api.spotify.com/v1/playlists/{playlist_id}?fields=name',
+            headers=headers, timeout=15,
+        )
+    except requests.RequestException as exc:
+        raise SpotifyAPIError(
+            "Spotify playlist metadata could not be reached."
+        ) from exc
+    if not meta_response.ok:
+        raise SpotifyAPIError(
+            f"Spotify could not open the playlist (HTTP {meta_response.status_code})."
+        )
+    playlist_name = meta_response.json().get('name', 'Unknown')
     print(f"Playlist: {playlist_name}")
 
-    # Fetch tracks via the dedicated tracks endpoint (paginated, max 100/page)
-    tracks_response = requests.get(
-        f'https://api.spotify.com/v1/playlists/{playlist_id}/tracks',
-        headers=headers,
-    )
-    tracks_page = tracks_response.json()
-    all_tracks = tracks_page.get('items', [])
-    next_url = tracks_page.get('next')
+    items_url = f'https://api.spotify.com/v1/playlists/{playlist_id}/items'
+    all_items = []
+    total = None
+    params = {'limit': 50}
+    try:
+        while items_url:
+            response = requests.get(
+                items_url, headers=headers, params=params, timeout=15,
+            )
+            params = None
+            if response.status_code == 401:
+                raise SpotifyAPIError(
+                    "Spotify login expired or was revoked. Connect again."
+                )
+            if response.status_code == 403:
+                raise SpotifyAPIError(
+                    "Spotify only permits playlists owned by or shared "
+                    "collaboratively with the connected account."
+                )
+            if not response.ok:
+                raise SpotifyAPIError(
+                    f"Spotify playlist fetch failed (HTTP {response.status_code})."
+                )
+            page = response.json()
+            if total is None:
+                total = page.get('total')
+            all_items.extend(page.get('items', []))
+            items_url = page.get('next')
+            if items_url:
+                print(f"Fetching more tracks... (currently have {len(all_items)})")
+    except requests.RequestException as exc:
+        raise SpotifyAPIError(
+            "Spotify playlist items could not be reached."
+        ) from exc
 
-    while next_url:
-        print(f"Fetching more tracks... (currently have {len(all_tracks)})")
-        response = requests.get(next_url, headers=headers)
-        data = response.json()
-        all_tracks.extend(data.get('items', []))
-        next_url = data.get('next')
-
-    print(f"✓ Fetched all {len(all_tracks)} tracks!")
-
-    # Preserve the shape downstream (parse_playlist_data) expects
+    print(f"✓ Fetched all {len(all_items)} tracks!")
     return {
         'name': playlist_name,
         'tracks': {
-            'items': all_tracks,
-            'total': tracks_page.get('total', len(all_tracks)),
+            'items': all_items,
+            'total': total if total is not None else len(all_items),
         },
     }
+
+
+def fetch_spotify_playlist(playlist_url, client_id, client_secret):
+    """Reject the obsolete app-only playlist flow with a clear error."""
+    raise SpotifyAPIError(
+        "Spotify no longer permits playlist-item access through Client "
+        "Credentials. Use the web app's Connect Spotify flow."
+    )
 
 
 def parse_playlist_data(playlist_data):
@@ -355,16 +586,21 @@ def parse_playlist_data(playlist_data):
     songs = []
 
     for item in tracks:
-        track = item['track']
+        # Spotify renamed playlist entry `track` to `item` in February 2026.
+        # Accept both shapes so cached/older responses remain compatible.
+        track = item.get('item') or item.get('track')
+        if not isinstance(track, dict) or track.get('type') not in (None, 'track'):
+            continue
 
         name = track['name']
         artist = track['artists'][0]['name']
-        release_date = track['album']['release_date']
-        spotify_year = int(release_date.split("-")[0])
-        year = spotify_year # default
-        
-        # Try to get more accurate year from MusicBrainz or iTunes   
-        year, year_source = get_year_and_source(name, artist, spotify_year)     
+        release_date = track['album'].get('release_date', '')
+        try:
+            spotify_year = _validate_year(int(release_date.split("-")[0]))
+        except (TypeError, ValueError):
+            spotify_year = None
+        year = spotify_year
+        year_source = 'Spotify' if spotify_year is not None else None
 
         song = {}
         song['name'] = sanitize_name(name)
@@ -440,11 +676,11 @@ def create_qr_code(song_link):
     return ImageOps.invert(img)
 
 
-def create_qr_with_neon_rings(qr_code, output_path):
+def create_qr_with_neon_rings(qr_code, output_path, card_number=None):
     """
     Create QR code card with colorful neon rings background.
     """
-    img = create_qr_with_neon_rings_in_memory(qr_code)
+    img = create_qr_with_neon_rings_in_memory(qr_code, card_number=card_number)
     img.save(output_path)
     return output_path
 
@@ -490,73 +726,116 @@ def get_year_color(year, all_years, settings=None):
 
 
 _google_font_cache = {}
+_google_font_variants_cache = {}
 
-def get_google_font(family_name, size, fallback_font):
-    """Downloads a Google Font and caches it, or returns fallback."""
+
+def normalize_font_weight(weight, default=400):
+    """Return a supported CSS font weight from 100 through 900."""
+    try:
+        weight = int(weight)
+    except (TypeError, ValueError):
+        weight = default
+    return min(900, max(100, round(weight / 100) * 100))
+
+
+def _font_variant_details(variant):
+    """Return ``(weight, italic)`` for a Google Webfonts Helper variant."""
+    variant_id = str(variant.get('id', '')).lower()
+    italic = variant_id.endswith('italic')
+    weight_id = variant_id[:-6] if italic else variant_id
+    if weight_id in ('', 'regular'):
+        weight = 400
+    else:
+        match = re.search(r'\d{3}', weight_id)
+        weight = int(match.group()) if match else 400
+    return normalize_font_weight(weight), italic
+
+
+def _select_google_font_variant(variants, weight, italic):
+    """Select the exact or closest available weight for the requested style."""
+    candidates = [variant for variant in variants if variant.get('ttf')]
+    if not candidates:
+        return None
+
+    matching_style = [
+        variant for variant in candidates
+        if _font_variant_details(variant)[1] == italic
+    ]
+    pool = matching_style or candidates
+    return min(
+        pool,
+        key=lambda variant: (
+            abs(_font_variant_details(variant)[0] - weight),
+            _font_variant_details(variant)[0],
+        ),
+    )
+
+
+def get_google_font(family_name, size, fallback_font, italic=False, weight=700):
+    """Download and cache the closest Google Font weight, or return fallback."""
     if not family_name:
         return fallback_font
-    
+
+    weight = normalize_font_weight(weight, default=700)
     font_id = family_name.lower().replace(" ", "-")
-    cache_key = (font_id, size)
-    
+    font_bytes_key = (font_id, weight, italic)
+    cache_key = (font_id, weight, italic, size)
+
     if cache_key in _google_font_cache:
         return _google_font_cache[cache_key]
-        
-    font_bytes = _google_font_cache.get(font_id)
+
+    font_bytes = _google_font_cache.get(font_bytes_key)
     if not font_bytes:
         try:
-            api_url = f"https://gwfh.mranftl.com/api/fonts/{font_id}"
-            r = requests.get(api_url, timeout=5)
-            if r.status_code == 200:
-                data = r.json()
-                ttf_url = None
-                
-                # Prefer bold (700) or bold-italic if available, otherwise fallback
-                for variant in data.get('variants', []):
-                    if variant.get('id') == '700' and variant.get('ttf'):
-                        ttf_url = variant['ttf']
-                        break
-                
-                if not ttf_url:
-                    for variant in data.get('variants', []):
-                        if variant.get('ttf'):
-                            ttf_url = variant['ttf']
-                            break
-                            
-                if ttf_url:
-                    r_ttf = requests.get(ttf_url, timeout=5)
-                    if r_ttf.status_code == 200:
-                        font_bytes = r_ttf.content
-                        _google_font_cache[font_id] = font_bytes
+            variants = _google_font_variants_cache.get(font_id)
+            if variants is None:
+                api_url = f"https://gwfh.mranftl.com/api/fonts/{font_id}"
+                response = requests.get(api_url, timeout=5)
+                variants = response.json().get('variants', []) if response.status_code == 200 else []
+                _google_font_variants_cache[font_id] = variants
+
+            variant = _select_google_font_variant(variants, weight, italic)
+            if variant:
+                response = requests.get(variant['ttf'], timeout=5)
+                if response.status_code == 200:
+                    font_bytes = response.content
+                    _google_font_cache[font_bytes_key] = font_bytes
         except Exception as e:
             print(f"Error downloading font: {e}")
-            pass
-            
+
     if font_bytes:
         try:
             font = ImageFont.truetype(io.BytesIO(font_bytes), size)
             _google_font_cache[cache_key] = font
             return font
-        except:
+        except (OSError, TypeError):
             pass
-            
+
     return fallback_font
 
-def get_font_for_setting(settings, size):
+
+def get_font_for_setting(settings, size, role="artist", italic=False, weight=700):
     """Get the preferred font (Google Font or fallback) for a given size."""
     try:
-        fallback = ImageFont.truetype(settings['fonts_dict']['artist'], size)
-    except:
+        fallback = ImageFont.truetype(settings['fonts_dict'][role], size)
+    except (KeyError, OSError, TypeError):
         fallback = ImageFont.load_default()
-        
-    return get_google_font(settings.get('google_font', 'Montserrat'), size, fallback)
+
+    return get_google_font(
+        settings.get('google_font', 'Montserrat'), size, fallback,
+        italic=italic, weight=weight,
+    )
 
 
-def create_solution_side(song_name, artist, year, all_years, output_path):
+def create_solution_side(
+    song_name, artist, year, all_years, output_path, card_number=None
+):
     """
     Create solution card with year-based color background.
     """
-    img = create_solution_side_in_memory(song_name, artist, year, all_years)    
+    img = create_solution_side_in_memory(
+        song_name, artist, year, all_years, card_number=card_number
+    )
     img.save(output_path)
     return output_path
 
@@ -564,27 +843,89 @@ def create_solution_side(song_name, artist, year, all_years, output_path):
 # PDF GENERATION
 # =============================================================================
 
+PDF_CARD_SIZE = CARD_PHYSICAL_SIZE_CM * cm
+PDF_GRID_COLS = 3
+PDF_GRID_ROWS = 4
+PDF_CARDS_PER_PAGE = PDF_GRID_COLS * PDF_GRID_ROWS
+PDF_INNER_GUTTER_SCALE = 0.25
+PDF_RENDER_DPI = 720
+PDF_RENDER_CARD_SIZE = round(PDF_RENDER_DPI * PDF_CARD_SIZE / 72)
+PDF_SCALED_PIXEL_SETTINGS = (
+    'qr_backplate_padding', 'qr_backplate_radius', 'neon_ring_thickness',
+    'qr_title_size', 'sol_border_width', 'song_year_size',
+    'song_artist_size', 'song_title_size', 'card_number_size',
+    'sol_title_size',
+)
+
+
+def get_pdf_grid_layout(page_width, page_height):
+    """Return a centered A4 grid with quarter-size gaps between cards."""
+    previous_gap_x = (
+        page_width - PDF_GRID_COLS * PDF_CARD_SIZE
+    ) / (PDF_GRID_COLS + 1)
+    previous_gap_y = (
+        page_height - PDF_GRID_ROWS * PDF_CARD_SIZE
+    ) / (PDF_GRID_ROWS + 1)
+    gap_x = previous_gap_x * PDF_INNER_GUTTER_SCALE
+    gap_y = previous_gap_y * PDF_INNER_GUTTER_SCALE
+    margin_x = (
+        page_width - PDF_GRID_COLS * PDF_CARD_SIZE
+        - (PDF_GRID_COLS - 1) * gap_x
+    ) / 2
+    margin_y = (
+        page_height - PDF_GRID_ROWS * PDF_CARD_SIZE
+        - (PDF_GRID_ROWS - 1) * gap_y
+    ) / 2
+    return PDF_CARD_SIZE, margin_x, margin_y, gap_x, gap_y
+
+
+def get_pdf_render_settings(settings):
+    """Scale pixel-based design values to the configured PDF output DPI."""
+    render_settings = dict(settings)
+    source_size = max(1, int(render_settings.get('card_size', 2000)))
+    target_size = PDF_RENDER_CARD_SIZE
+    if target_size == source_size:
+        return render_settings
+
+    scale = target_size / source_size
+    render_settings['card_size'] = target_size
+    for key in PDF_SCALED_PIXEL_SETTINGS:
+        if key in render_settings:
+            value = render_settings[key]
+            render_settings[key] = (
+                0 if value == 0 else max(1, round(value * scale))
+            )
+    return render_settings
+
+
+def draw_pdf_card_image(c, image_source, x, y, card_size):
+    """Draw a card at the raster dimensions required for the PDF output DPI."""
+    with Image.open(image_source) as source_image:
+        if source_image.size != (PDF_RENDER_CARD_SIZE, PDF_RENDER_CARD_SIZE):
+            source_image = source_image.resize(
+                (PDF_RENDER_CARD_SIZE, PDF_RENDER_CARD_SIZE),
+                Image.Resampling.LANCZOS,
+            )
+        c.drawImage(
+            ImageReader(source_image), x, y,
+            width=card_size, height=card_size, preserveAspectRatio=True,
+        )
+
+
 def create_cards_pdf(cards_folder, output_pdf_path):
     """
     Create print-ready PDF with alternating front/back pages.
-    4x5 grid (20 cards per page), 5cm x 5cm cards, ready for duplex printing.
+    3x4 grid (12 cards per page), 6.5cm x 6.5cm cards, ready for duplex printing.
     """
-    settings = get_settings()
     c = canvas.Canvas(output_pdf_path, pagesize=A4)
     width, height = A4
     
     # Card configuration
-    card_size = 5 * cm
-    gap_size = 0.2 * cm
-    cards_per_row = 4
-    cards_per_col = 5
-    cards_per_page = cards_per_row * cards_per_col
-    
-    # Calculate layout
-    total_width = cards_per_row * card_size + (cards_per_row - 1) * gap_size
-    total_height = cards_per_col * card_size + (cards_per_col - 1) * gap_size
-    margin_x = (width - total_width) / 2
-    margin_y = (height - total_height) / 2
+    card_size, margin_x, margin_y, gap_x, gap_y = get_pdf_grid_layout(
+        width, height
+    )
+    cards_per_row = PDF_GRID_COLS
+    cards_per_page = PDF_CARDS_PER_PAGE
     
     # Get sorted card files
     qr_images = sorted([f for f in os.listdir(cards_folder) if f.endswith('_qr.png')],
@@ -599,14 +940,8 @@ def create_cards_pdf(cards_folder, output_pdf_path):
         start_card = page_idx * cards_per_page
         end_card = min(start_card + cards_per_page, len(qr_images))
         
-        # FRONT PAGE (QR codes)
-        bg_color = settings.get('card_background_color', (0, 0, 0))
-        if isinstance(bg_color, str):
-            try:
-                bg_color = hex2color(bg_color)
-            except:
-                bg_color = (0, 0, 0)
-        c.setFillColorRGB(bg_color[0], bg_color[1], bg_color[2])
+        # FRONT PAGE (QR codes) — keep sheet margins/gutters ink-free.
+        c.setFillColorRGB(1, 1, 1)
         c.rect(0, 0, width, height, stroke=0, fill=1)
         
         for card_idx in range(start_card, end_card):
@@ -614,12 +949,11 @@ def create_cards_pdf(cards_folder, output_pdf_path):
             row = idx // cards_per_row
             col = idx % cards_per_row
             
-            x = margin_x + col * (card_size + gap_size)
-            y = height - margin_y - (row + 1) * card_size - row * gap_size
+            x = margin_x + col * (card_size + gap_x)
+            y = height - margin_y - (row + 1) * card_size - row * gap_y
             
             qr_path = os.path.join(cards_folder, qr_images[card_idx])
-            c.drawImage(ImageReader(qr_path), x, y, 
-                       width=card_size, height=card_size, preserveAspectRatio=True)
+            draw_pdf_card_image(c, qr_path, x, y, card_size)
         
         c.showPage()
         
@@ -633,12 +967,11 @@ def create_cards_pdf(cards_folder, output_pdf_path):
             col = idx % cards_per_row
             col_mirrored = cards_per_row - 1 - col  # Mirror for duplex
             
-            x = margin_x + col_mirrored * (card_size + gap_size)
-            y = height - margin_y - (row + 1) * card_size - row * gap_size
+            x = margin_x + col_mirrored * (card_size + gap_x)
+            y = height - margin_y - (row + 1) * card_size - row * gap_y
             
             sol_path = os.path.join(cards_folder, solution_images[card_idx])
-            c.drawImage(ImageReader(sol_path), x, y,
-                       width=card_size, height=card_size, preserveAspectRatio=True)
+            draw_pdf_card_image(c, sol_path, x, y, card_size)
         
         c.showPage()
     
@@ -680,6 +1013,110 @@ def apply_background_image(img, bg_img, scale, offset_x, offset_y, card_size):
         img.paste(resized, (x, y))
 
 
+def derive_solution_color_wash_palette(base_color, separation=1.0):
+    """Return the base and a randomized-strength warmer/brighter RGB color."""
+    base_rgb = tuple(round(channel * 255) for channel in to_rgba(base_color)[:3])
+    red, green, blue = (channel / 255 for channel in base_rgb)
+    hue, lightness, saturation = colorsys.rgb_to_hls(red, green, blue)
+
+    def move_hue_toward(target, amount=0.24):
+        distance = (target - hue + 0.5) % 1.0 - 0.5
+        return (hue + distance * amount) % 1.0
+
+    adjusted_saturation = min(1.0, max(saturation, 0.08) + 0.05)
+    maximum_warm = colorsys.hls_to_rgb(
+        move_hue_toward(25 / 360),
+        lightness + (1.0 - lightness) * 0.22,
+        adjusted_saturation,
+    )
+    separation = max(0.0, min(1.0, float(separation)))
+    maximum_warm_rgb = tuple(round(channel * 255) for channel in maximum_warm)
+    warm_rgb = tuple(
+        round(base_channel + (warm_channel - base_channel) * separation)
+        for base_channel, warm_channel in zip(base_rgb, maximum_warm_rgb)
+    )
+    return base_rgb, warm_rgb
+
+
+def derive_solution_cool_color(base_color, separation=1.0):
+    """Return a randomized-strength cooler/darker companion RGB color."""
+    base_rgb = tuple(round(channel * 255) for channel in to_rgba(base_color)[:3])
+    cool_target = (35, 55, 145)
+    maximum_cool_rgb = tuple(
+        round((base_channel * 0.84 + target_channel * 0.16) * 0.88)
+        for base_channel, target_channel in zip(base_rgb, cool_target)
+    )
+    separation = max(0.0, min(1.0, float(separation)))
+    return tuple(
+        round(base_channel + (cool_channel - base_channel) * separation)
+        for base_channel, cool_channel in zip(base_rgb, maximum_cool_rgb)
+    )
+
+
+def render_solution_color_wash(img, settings, seed=42):
+    """Render independently randomized warm and cool solution color fields."""
+    rng = np.random.default_rng(seed & 0xFFFFFFFF)
+    base_color = settings.get('sol_color_wash_base_color', (213, 43, 131))
+    base = tuple(round(channel * 255) for channel in to_rgba(base_color)[:3])
+    mesh_size = max(128, min(384, img.width // 5))
+    y_grid, x_grid = np.mgrid[0:mesh_size, 0:mesh_size].astype(np.float32)
+    x_grid /= mesh_size - 1
+    y_grid /= mesh_size - 1
+    canvas = np.empty((mesh_size, mesh_size, 3), dtype=np.float32)
+    canvas[:] = base
+
+    def apply_color_field(field_color, field_opacity, edge_influence, angle):
+        center_distance = rng.uniform(0.52, 0.68)
+        center_x = 0.5 + np.cos(angle) * center_distance
+        center_y = 0.5 + np.sin(angle) * center_distance
+        maximum_radius = 0.95 + edge_influence * (1.35 - 0.95)
+        radius_x = maximum_radius * rng.uniform(0.90, 1.08)
+        radius_y = maximum_radius * rng.uniform(0.90, 1.08)
+        distance = np.sqrt(
+            ((x_grid - center_x) / radius_x) ** 2
+            + ((y_grid - center_y) / radius_y) ** 2
+        )
+        strength = np.clip(1.0 - distance, 0.0, 1.0)
+        strength = strength * strength * (3.0 - 2.0 * strength)
+        alpha = (strength * field_opacity)[..., np.newaxis]
+        canvas[:] += (np.asarray(field_color, dtype=np.float32) - canvas) * alpha
+
+    # Keep every field unmistakably visible while retaining per-card variation.
+    warm_separation = rng.uniform(0.80, 1.0)
+    warm_opacity = rng.uniform(0.55, 0.78)
+    warm_edge_influence = rng.uniform(0.75, 1.0)
+    _, warm = derive_solution_color_wash_palette(
+        base, separation=warm_separation
+    )
+    warm_angle = rng.uniform(0, 2 * np.pi)
+    apply_color_field(warm, warm_opacity, warm_edge_influence, warm_angle)
+
+    cool_separation = rng.uniform(0.80, 1.0)
+    cool_opacity = rng.uniform(0.55, 0.78)
+    cool_edge_influence = rng.uniform(0.75, 1.0)
+    cool = derive_solution_cool_color(base, separation=cool_separation)
+    cool_angle = warm_angle + np.pi + rng.uniform(-0.35, 0.35)
+    apply_color_field(cool, cool_opacity, cool_edge_influence, cool_angle)
+
+    # The deliberately strong fields survive 8-bit conversion cleanly. Resize
+    # the compact mesh once instead of resampling three full-resolution float
+    # channels, which keeps large PDF batches practical.
+    wash = Image.fromarray(
+        np.clip(np.rint(canvas), 0, 255).astype(np.uint8), mode="RGB"
+    ).resize(img.size, Image.Resampling.LANCZOS)
+
+    grain_opacity = max(
+        0.0, min(0.05, float(settings.get('sol_color_wash_grain_opacity', 0.012)))
+    )
+    if grain_opacity:
+        grain_values = rng.integers(0, 256, img.size[::-1], dtype=np.uint8)
+        grain_channel = Image.fromarray(grain_values)
+        grain = Image.merge("RGB", (grain_channel, grain_channel, grain_channel))
+        wash = Image.blend(wash, grain, grain_opacity)
+
+    img.paste(wash)
+
+
 def render_card_background(img, settings, side="qr", seed=42):
     """Render the card background (solid, neon rings, or image)."""
     size = settings['card_size']
@@ -706,19 +1143,32 @@ def render_card_background(img, settings, side="qr", seed=42):
     if side == "qr":
         draw.rectangle([(0, 0), (size, size)], fill=bg_color)
     
-    if bg_type == "image" and bg_img:
+    if (
+        side == "sol"
+        and settings.get('sol_color_wash_enabled', True)
+        and not settings.get('ink_saving_mode', False)
+    ):
+        render_solution_color_wash(img, settings, seed=seed)
+    elif bg_type == "image" and bg_img:
         apply_background_image(img, bg_img, scale, offset_x, offset_y, size)
     elif bg_type == "neon_rings" and side == "qr":
         # Draw neon rings — unique pattern per card
         center = size // 2
-        max_radius = size // 2 - 50
+        edge_clearance = math.ceil(
+            size * NEON_RING_EDGE_CLEARANCE_CM / CARD_PHYSICAL_SIZE_CM
+        )
+        max_radius = min(center, size - 1 - center) - edge_clearance
         
-        qr_size = int(size * settings['qr_size_ratio'])
-        safety_radius = (qr_size // 2) + settings['qr_backplate_padding'] + 20
+        qr_size = get_qr_code_size_pixels(settings)
+        qr_padding = get_qr_backplate_padding_pixels(settings)
+        safety_radius = (
+            (qr_size // 2) + qr_padding
+            + round(size * 0.01)
+        )
         
         random.seed(seed)
         neon_colors = settings['neon_colors']
-        ring_count = settings.get('neon_ring_count', 8)
+        ring_count = settings.get('neon_ring_count', 14)
         thickness = settings.get('neon_ring_thickness', 12)
         
         for i in range(ring_count):
@@ -748,7 +1198,7 @@ def render_card_background(img, settings, side="qr", seed=42):
 
     # Draw border
     if settings.get('card_draw_border'):
-        border_width = 20
+        border_width = max(1, round(size * 0.01))
         draw.rectangle(
             [(border_width, border_width), (size - border_width, size - border_width)],
             outline=settings['card_border_color'],
@@ -761,8 +1211,8 @@ def render_qr_backplate(img, settings):
         return
         
     size = settings['card_size']
-    qr_size = int(size * settings['qr_size_ratio'])
-    padding = settings['qr_backplate_padding']
+    qr_size = get_qr_code_size_pixels(settings)
+    padding = get_qr_backplate_padding_pixels(settings)
     radius = settings['qr_backplate_radius']
     bg_color = settings['qr_background_color']
     
@@ -770,8 +1220,8 @@ def render_qr_backplate(img, settings):
     side = qr_size + 2 * padding
     left = center - side // 2
     top = center - side // 2
-    right = left + side
-    bottom = top + side
+    right = left + side - 1
+    bottom = top + side - 1
     
     overlay = Image.new("RGBA", (size, size), (0,0,0,0))
     overlay_draw = ImageDraw.Draw(overlay)
@@ -787,7 +1237,7 @@ def render_qr_code(img, qr_code, settings):
     """Render the QR code modules on top of the card."""
     size = settings['card_size']
     center = size // 2
-    qr_size_base = int(size * settings['qr_size_ratio'])
+    qr_size_base = get_qr_code_size_pixels(settings)
     quiet_zone = settings.get('qr_quiet_zone', 2)
     
     qr_code_rgb = qr_code.convert('RGB')
@@ -820,59 +1270,147 @@ def render_game_title(img, settings, side="qr"):
         return
         
     title = settings[f'{prefix}_title']
-    pos = settings.get(f'{prefix}_title_pos', 'top')
-    font_size = settings.get(f'{prefix}_title_size', 80)
-    color = settings.get(f'{prefix}_title_color', (255, 255, 255) if side == 'qr' else (0, 0, 0))
+    default_pos = 'top' if side == 'qr' else 'in_border_top_left'
+    pos = settings.get(f'{prefix}_title_pos', default_pos)
+    default_font_size = 80 if side == 'qr' else 140
+    font_size = settings.get(f'{prefix}_title_size', default_font_size)
+    color = settings.get(f'{prefix}_title_color', (255, 255, 255))
+    default_opacity = 100 if side == 'qr' else 60
+    opacity = max(0, min(100, settings.get(f'{prefix}_title_opacity', default_opacity)))
     bg_enabled = settings.get(f'{prefix}_title_bg', False)
     bg_color = settings.get('qr_bg_color', (0, 0, 0)) if side == 'qr' else (255, 255, 255)
 
     size = settings['card_size']
-    margin = 100
+    margin = round(size * 0.05)
     
     draw = ImageDraw.Draw(img)
-    font = get_font_for_setting(settings, font_size)
+    title_is_italic = side == "qr"
+    title_role = "song" if title_is_italic else "artist"
+    font = get_font_for_setting(
+        settings, font_size, role=title_role, italic=title_is_italic,
+        weight=settings.get('card_set_title_font_weight', 500),
+    )
         
     bbox = draw.textbbox((0, 0), title, font=font)
     tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    ink_bbox = font.getmask(title).getbbox()
+    ink_left, ink_top, ink_right, ink_bottom = ink_bbox or (0, 0, tw, th)
     
     center = size // 2
-    qr_bound = center + int(size * settings.get('qr_size_ratio', 0.45)) // 2 + settings.get('qr_backplate_padding', 40)
-    bw = settings.get('sol_border_width', 100) // 2
+    qr_bound = (
+        center
+        + get_qr_code_size_pixels(settings) // 2
+        + get_qr_backplate_padding_pixels(settings)
+    )
+    bw = settings.get('sol_border_width', 142) // 2
 
-    positions = {
-        "top": (center, margin + th // 2, "mm"),
-        "bottom": (center, size - margin - th // 2, "mm"),
-        "top_left": (margin + tw // 2, margin + th // 2, "mm"),
-        "top_right": (size - margin - tw // 2, margin + th // 2, "mm"),
-        "bottom_left": (margin + tw // 2, size - margin - th // 2, "mm"),
-        "bottom_right": (size - margin - tw // 2, size - margin - th // 2, "mm"),
-        "center_above_qr": (center, size - qr_bound - margin - th // 2, "mm"),
-        "center_below_qr": (center, qr_bound + margin + th // 2, "mm"),
-        "in_border_bottom_right": (size - bw, size - bw, "rm"),
-        "in_border_bottom_left": (bw, size - bw, "lm"),
-        "in_border_top_right": (size - bw, bw, "rm"),
-        "in_border_top_left": (bw, bw, "lm"),
-    }
-    
-    if pos not in positions:
-        return
-        
-    x, y, anchor = positions[pos]
+    if side == "sol":
+        left = card_distance_cm_to_pixels(size, SOLUTION_TITLE_LEFT_OFFSET_CM)
+        top = card_distance_cm_to_pixels(size, SOLUTION_TITLE_TOP_OFFSET_CM)
+        ink_offsets = (
+            bbox[0] + ink_left, bbox[1] + ink_top,
+            bbox[0] + ink_right, bbox[1] + ink_bottom,
+        )
+        x, y, anchor = left - ink_offsets[0], top - ink_offsets[1], None
+        positioned_bbox = (
+            left, top,
+            left + ink_offsets[2] - ink_offsets[0],
+            top + ink_offsets[3] - ink_offsets[1],
+        )
+    else:
+        positions = {
+            "top": (center, margin + th // 2, "mm"),
+            "bottom": (center, size - margin - th // 2, "mm"),
+            "top_left": (margin + tw // 2, margin + th // 2, "mm"),
+            "top_right": (size - margin - tw // 2, margin + th // 2, "mm"),
+            "bottom_left": (margin + tw // 2, size - margin - th // 2, "mm"),
+            "bottom_right": (size - margin - tw // 2, size - margin - th // 2, "mm"),
+            "center_above_qr": (center, size - qr_bound - margin - th // 2, "mm"),
+            "center_below_qr": (center, qr_bound + margin + th // 2, "mm"),
+            "in_border_bottom_right": (size - bw - ink_right, size - bw - ink_bottom, "lt"),
+            "in_border_bottom_left": (bw - ink_left, size - bw - ink_bottom, "lt"),
+            "in_border_top_right": (size - bw - ink_right, bw - ink_top, "lt"),
+            "in_border_top_left": (bw - ink_left, bw - ink_top, "lt"),
+        }
 
+        if pos not in positions:
+            return
+
+        x, y, anchor = positions[pos]
+        if pos.startswith("in_border_"):
+            positioned_bbox = (
+                x + ink_left, y + ink_top, x + ink_right, y + ink_bottom
+            )
+        else:
+            positioned_bbox = draw.textbbox(
+                (x, y), title, font=font, anchor=anchor
+            )
     if bg_enabled:
-        bg_padding = 15
+        bg_padding = max(1, round(size * 0.0075))
         overlay = Image.new("RGBA", (size, size), (0,0,0,0))
         overlay_draw = ImageDraw.Draw(overlay)
         
-        left = x - tw - bg_padding if anchor == "rm" else (x - bg_padding if anchor == "lm" else x - tw // 2 - bg_padding)
-        right = x + bg_padding if anchor == "rm" else (x + tw + bg_padding if anchor == "lm" else x + tw // 2 + bg_padding)
-        
-        overlay_draw.rectangle([left, y - th // 2 - bg_padding, right, y + th // 2 + bg_padding], fill=bg_color)
+        left, top, right, bottom = positioned_bbox
+        overlay_draw.rectangle(
+            [left - bg_padding, top - bg_padding,
+             right + bg_padding, bottom + bg_padding],
+            fill=bg_color
+        )
         img.paste(overlay, (0, 0), overlay)
 
-    draw.text((x, y), title, fill=color, font=font, anchor=anchor)
+    text_overlay = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    text_draw = ImageDraw.Draw(text_overlay)
+    rgb = tuple(round(channel * 255) for channel in to_rgba(color)[:3])
+    text_draw.text(
+        (x, y), title, fill=rgb + (round(opacity * 255 / 100),),
+        font=font, anchor=anchor
+    )
+    img.paste(text_overlay, (0, 0), text_overlay)
 
-def create_qr_with_neon_rings_in_memory(qr_code, seed=42, settings_override=None):
+
+def render_card_number(img, card_number, settings, side="qr"):
+    """Render a card number in the bottom-right corner."""
+    if card_number is None:
+        return
+
+    font_size = settings.get('card_number_size', max(20, round(img.width * 0.035)))
+    opacity = max(0, min(100, settings.get('qr_card_number_opacity', 42))) if side == "qr" else 100
+    alpha = round(opacity * 255 / 100)
+
+    font = get_font_for_setting(
+        settings, font_size, role="artist",
+        weight=settings.get('card_number_font_weight', 600),
+    )
+
+    number_overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    overlay_draw = ImageDraw.Draw(number_overlay)
+    number_text = str(card_number)
+    bbox = overlay_draw.textbbox((0, 0), number_text, font=font)
+    mask_bbox = font.getmask(number_text).getbbox()
+    if mask_bbox:
+        ink_bbox = (
+            bbox[0] + mask_bbox[0], bbox[1] + mask_bbox[1],
+            bbox[0] + mask_bbox[2], bbox[1] + mask_bbox[3],
+        )
+    else:
+        ink_bbox = bbox
+    right = card_distance_cm_to_pixels(
+        img.width, CARD_NUMBER_RIGHT_OFFSET_CM
+    )
+    bottom = card_distance_cm_to_pixels(
+        img.height, CARD_NUMBER_BOTTOM_OFFSET_CM
+    )
+    x = img.width - right - ink_bbox[2]
+    y = img.height - bottom - ink_bbox[3]
+    overlay_draw.text(
+        (x, y), number_text, fill=(255, 255, 255, alpha), font=font
+    )
+    img.paste(number_overlay, (0, 0), number_overlay)
+
+
+def create_qr_with_neon_rings_in_memory(
+    qr_code, seed=42, settings_override=None, card_number=None
+):
     """
     Create QR code card with colorful neon rings background.
     seed: per-card seed for unique ring patterns.
@@ -888,17 +1426,38 @@ def create_qr_with_neon_rings_in_memory(qr_code, seed=42, settings_override=None
     render_qr_backplate(img, settings)
     render_qr_code(img, qr_code, settings)
     render_game_title(img, settings, side="qr")
+    render_card_number(img, card_number, settings, side="qr")
         
     return img
 
-def create_solution_side_in_memory(song_name, artist, year, all_years, settings_override=None):
+
+def draw_centered_text_at_edge(draw, text, font, center_x, edge_y, edge):
+    """Draw a centered text block whose visible bounds meet a fixed edge."""
+    bbox = draw.multiline_textbbox(
+        (0, 0), text, font=font, align="center"
+    )
+    x = center_x - (bbox[0] + bbox[2]) / 2
+    if edge == "top":
+        y = edge_y - bbox[1]
+    elif edge == "bottom":
+        y = edge_y - bbox[3]
+    else:
+        raise ValueError(f"Unsupported text edge: {edge}")
+    draw.multiline_text(
+        (x, y), text, fill="#000000", font=font, align="center"
+    )
+
+
+def create_solution_side_in_memory(
+    song_name, artist, year, all_years, settings_override=None, card_number=None
+):
     """
     Create solution card and return the PIL Image object directly.
     settings_override: dict of settings to override defaults.
     """
     settings = get_settings(settings_override)
     size = settings['card_size']
-    margin = 150
+    margin = round(size * 0.075)
     max_width = size - (2 * margin)
     
     # Handle unknown year gracefully
@@ -918,28 +1477,38 @@ def create_solution_side_in_memory(song_name, artist, year, all_years, settings_
     # Create the base image
     ink_saving_mode = settings.get('ink_saving_mode', False)
     background_color = (255, 255, 255) if ink_saving_mode else color_int
-    border_width = settings.get('sol_border_width', 100)
+    border_width = settings.get('sol_border_width', 142)
 
     img = Image.new("RGB", (size, size), background_color)
     
+    if settings.get('sol_color_wash_enabled', True):
+        settings['sol_color_wash_base_color'] = color_int
     # Apply background overrides for solution side
-    render_card_background(img, settings, side="sol")
+    background_seed = zlib.crc32(
+        f"{card_number}|{song_name}|{artist}|{year}".encode("utf-8")
+    )
+    render_card_background(img, settings, side="sol", seed=background_seed)
     
     if ink_saving_mode:
         draw = ImageDraw.Draw(img)
         draw.rectangle([(0, 0), (size - 1, size - 1)], outline=color_int, width=border_width)
     draw = ImageDraw.Draw(img)
     
-    font_year = get_font_for_setting(settings, 380)
-    font_artist = get_font_for_setting(settings, 110)
-    font_song = get_font_for_setting(settings, 100)
+    font_year = get_font_for_setting(
+        settings, settings.get('song_year_size', 570), role="year",
+        weight=settings.get('song_year_font_weight', 700),
+    )
+    font_artist = get_font_for_setting(
+        settings, settings.get('song_artist_size', 155), role="artist",
+        weight=settings.get('song_artist_font_weight', 500),
+    )
+    font_song = get_font_for_setting(
+        settings, settings.get('song_title_size', 155), role="song", italic=True,
+        weight=settings.get('song_title_font_weight', 300),
+    )
     
-    # Choose text color based on background luminance for contrast
-    if ink_saving_mode:
-        text_color = "black"
-    else:
-        luminance = 0.299 * color_rgb[0] + 0.587 * color_rgb[1] + 0.114 * color_rgb[2]
-        text_color = "black" if luminance > 0.5 else "white"
+    # Song title, artist, and year are always rendered in solid black.
+    text_color = "#000000"
 
     def get_fitted_text_in_memory(text, font, max_width):
         """Wrap text to fit within max_width."""
@@ -961,31 +1530,22 @@ def create_solution_side_in_memory(song_name, artist, year, all_years, settings_
     year_text = display_year
     
     # Draw centered text
-    gap = 400
     center_x = size / 2
     center_y = size / 2
-    
     draw.text((center_x, center_y), year_text, fill=text_color, 
              font=font_year, anchor="mm")
-    
-    artist_y = center_y - gap
-    if '\n' in artist_text:
-        draw.multiline_text((center_x, artist_y), artist_text, fill=text_color,
-                          font=font_artist, align="center", anchor="mm")
-    else:
-        draw.text((center_x, artist_y), artist_text, fill=text_color,
-                 font=font_artist, anchor="mm")
-    
-    song_y = center_y + gap
-    if '\n' in song_text:
-        draw.multiline_text((center_x, song_y), song_text, fill=text_color,
-                          font=font_song, align="center", anchor="mm")
-    else:
-        draw.text((center_x, song_y), song_text, fill=text_color,
-                 font=font_song, anchor="mm")
+
+    edge_offset = card_distance_cm_to_pixels(size, SONG_TEXT_EDGE_OFFSET_CM)
+    draw_centered_text_at_edge(
+        draw, artist_text, font_artist, center_x, edge_offset, "top"
+    )
+    draw_centered_text_at_edge(
+        draw, song_text, font_song, center_x, size - edge_offset, "bottom"
+    )
         
     # Render Custom Title on Solution Side
     render_game_title(img, settings, side="sol")
+    render_card_number(img, card_number, settings, side="sol")
     
     return img
 
@@ -1060,45 +1620,44 @@ def create_pdf_in_memory(songs, progress_bar=None, settings_override=None):
     if not songs:
         return None
 
-    settings = get_settings(settings_override)
+    settings = get_pdf_render_settings(get_settings(settings_override))
 
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
     width, height = A4
     
-    # Grid Settings (5x5 cm cards)
-    card_size = 5 * cm
-    cols, rows = 4, 5  # 20 cards per page
-    margin_x = (width - (cols * card_size)) / 2
-    margin_y = (height - (rows * card_size)) / 2
+    # Grid settings (6.5x6.5 cm cards, 12 per page)
+    card_size, margin_x, margin_y, gap_x, gap_y = get_pdf_grid_layout(
+        width, height
+    )
+    cols = PDF_GRID_COLS
 
     total_cards = len(songs)
     years = [song['year'] for song in songs]
+    starting_number = int(settings.get('card_number_start', 1))
 
     card_label = settings.get('card_label', None)
 
-    for i in range(0, total_cards, 20):
-        batch_songs = list(songs[i:i+20])
+    for i in range(0, total_cards, PDF_CARDS_PER_PAGE):
+        batch_songs = list(songs[i:i + PDF_CARDS_PER_PAGE])
 
-        # --- PAGE 1: FRONT (QR CODES) ---
-        bg_color = settings.get('card_background_color', (0, 0, 0))
-        if isinstance(bg_color, str):
-            try:
-                bg_color = hex2color(bg_color)
-            except:
-                bg_color = (0, 0, 0)
-        c.setFillColorRGB(bg_color[0], bg_color[1], bg_color[2])
+        # --- PAGE 1: FRONT (QR CODES) — WHITE MARGINS/GUTTERS ---
+        c.setFillColorRGB(1, 1, 1)
         c.rect(0, 0, width, height, stroke=0, fill=1)
 
         for idx, song in enumerate(batch_songs):
+            card_number = starting_number + i + idx
             col = idx % cols
             row = (idx // cols) 
-            x = margin_x + col * card_size
-            y = height - margin_y - (row + 1) * card_size
+            x = margin_x + col * (card_size + gap_x)
+            y = height - margin_y - (row + 1) * card_size - row * gap_y
             
             base_qr = create_qr_code(song['link'])
             # Per-card unique ring pattern based on link hash
-            qr_pil = create_qr_with_neon_rings_in_memory(base_qr, seed=hash(song['link']), settings_override=settings)
+            qr_pil = create_qr_with_neon_rings_in_memory(
+                base_qr, seed=hash(song['link']), settings_override=settings,
+                card_number=card_number
+            )
 
             img_byte_arr = io.BytesIO()
             qr_pil.save(img_byte_arr, format='PNG')
@@ -1116,19 +1675,27 @@ def create_pdf_in_memory(songs, progress_bar=None, settings_override=None):
         c.rect(0, 0, width, height, stroke=0, fill=1)
 
         for idx, song in enumerate(batch_songs):
+            card_number = starting_number + i + idx
             orig_col = idx % cols
             mirrored_col = (cols - 1) - orig_col
             row = (idx // cols)
             
-            x = margin_x + mirrored_col * card_size
-            y = height - margin_y - (row + 1) * card_size
+            x = margin_x + mirrored_col * (card_size + gap_x)
+            y = height - margin_y - (row + 1) * card_size - row * gap_y
             
             sol_pil = create_solution_side_in_memory(
-                song['name'], song['artist'], song['year'], years, settings_override=settings
+                song['name'], song['artist'], song['year'], years,
+                settings_override=settings, card_number=card_number
             )
 
             sol_byte_arr = io.BytesIO()
-            sol_pil.save(sol_byte_arr, format='PNG')
+            # The solution side is continuous-tone artwork. High-quality 4:4:4
+            # JPEG preserves its text and wash while avoiding enormous, slow
+            # per-pixel-grain PNG streams in large PDFs.
+            sol_pil.save(
+                sol_byte_arr, format='JPEG', quality=95, subsampling=0,
+                optimize=False,
+            )
             sol_byte_arr.seek(0)
 
             c.drawImage(ImageReader(sol_byte_arr), x, y, width=card_size, height=card_size)
@@ -1136,7 +1703,7 @@ def create_pdf_in_memory(songs, progress_bar=None, settings_override=None):
             del sol_pil, sol_byte_arr
 
         if progress_bar:
-            processed = min(i + 20, total_cards)
+            processed = min(i + PDF_CARDS_PER_PAGE, total_cards)
             percent = processed / total_cards
             progress_bar.progress(percent, text=f"Generated {processed}/{total_cards} cards...")
         c.showPage()

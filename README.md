@@ -32,7 +32,8 @@ Turn your favorite playlists into a physical card game. The tool creates profess
 | ✏️ **Manual Year Override** | Edit years in an interactive table before generating the PDF |
 | 🎨 **Neon QR Design** | Unique randomised neon rings on every card |
 | 🎯 **Smart Colours** | Dynamic gradient (Purple → Pink → Gold → Blue) mapped to release years |
-| 🖨️ **Print-Ready PDF** | A4, 5 × 5 cm cards, 20 per page, duplex-optimised |
+| 🎨 **Soft Color Wash** | Year-derived base colors with one randomized warm field and subtle print grain |
+| 🖨️ **Print-Ready PDF** | A4 at 720 DPI, 6.5 × 6.5 cm cards, 12 per page, duplex-optimised |
 | 💡 **Ink Saving Mode** | White background / black text toggle |
 | ✂️ **Cutting Borders** | Optional border lines for easier cutting |
 | 🏷️ **Card Labels** | Stamp each card with a custom label (event name, playlist, etc.) |
@@ -54,12 +55,21 @@ You can now fully customize the look and feel of your cards in the **sidebar** o
   - `Transparent`: Classic look, neon rings show through the QR code.
   - `Solid`: Draws a backplate (square or rounded) behind the QR code for maximum scan reliability.
 - **QR Colors:** Customize module and backplate colors.
-- **QR Size:** Scale the QR code up or down.
+- **QR Size:** The default QR code is 2.5 cm with a 0.1 cm border on every side, for a 2.7 cm total square.
 
 ### 🔤 Game Titles & Labels
 - **Game Title:** Add a custom text like "90s Party" or "Wedding 2026".
-- **Positioning:** Place the title at the top, bottom, or vertically on the sides.
+- **Positioning:** Position the QR-side title as needed; the solution-side title stays 0.3 cm from the top and 0.2 cm from the left.
 - **Styling:** Adjust font size, color, and background boxes for better readability.
+- **Font Weights:** Independently style card numbers, card-set names, song artists, years, and song titles from Thin (100) through Black (900). Song artists default to Medium (500), and song titles default to Light (300).
+- **Fixed Song Spacing:** Artist and title blocks keep a consistent 0.9 cm inset from the top and bottom card edges, including when text wraps.
+
+### 🎨 Solution Soft Color Wash
+
+- **Enable Soft Color Wash** is on by default in the Solution Side background settings.
+- Each card uses its year-gradient color as the base with warmer/brighter and cooler/darker companions.
+- Both fields use deliberately strong randomized separation and opacity, with their oversized centers placed near broadly opposite card edges.
+- Fine monochromatic grain gives the result a restrained, printed finish.
 
 ### 🖼️ Custom Background Image
 1. Select **Background Type: Image** in the sidebar.
@@ -121,8 +131,9 @@ All options can be set via the **sidebar** in the web app, via **CLI flags**, or
 | Ink saving mode | `--ink-save-mode` | `INK_SAVING_MODE=true` | `false` |
 | Cutting borders | `--card-draw-border` | `CARD_DRAW_BORDER=true` | `false` |
 | Card label | `--card-label "text"` | `CARD_LABEL=text` | *(none)* |
-| QR Background Mode | `--qr-bg-mode` | `QR_BG_MODE=solid` | `transparent` |
-| QR Module Color | `--qr-module-color` | `QR_MODULE_COLOR=#FFFFFF` | `#000000` |
+| Starting card number | `--start-number 1` | `CARD_START_NUMBER=1` | `1` |
+| QR Background Mode | `--qr-bg-mode` | `QR_BG_MODE=solid` | `solid` |
+| QR Module Color | `--qr-module-color` | `QR_MODULE_COLOR=#FFFFFF` | `#FFFFFF` |
 | Background Type | `--bg-type` | `BG_TYPE=neon_rings` | `neon_rings` |
 | Game Title | `--game-title` | `GAME_TITLE=MyGame` | *(none)* |
 
@@ -144,14 +155,19 @@ COLOR_GRADIENT = [
 
 ---
 
-## 🔑 Spotify API Credentials (optional)
+## 🔑 Spotify User Authorization (playlists over ~100 tracks)
 
-Only needed if you want to fetch playlists larger than ~100 tracks via the API.
+Spotify requires user authorization to read complete playlist contents. The playlist
+must be owned by, or collaboratively shared with, the connected Spotify account.
 
-1. Go to the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard).
-2. Create an app (Redirect URI: `https://localhost`, check **Web API**).
-3. Copy **Client ID** and **Client Secret**.
-4. Enter them in the web app sidebar *or* add them to your `.env` file.
+1. Go to the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard) and create an app.
+2. Copy the **Redirect URI** shown under **Connect Spotify** in the web app sidebar into the app's Redirect URI allowlist exactly.
+3. Enter the app's **Client ID** and **Client Secret** in the sidebar.
+4. Select **Prepare Spotify Login**, then **Authorize with Spotify** and approve access.
+5. Paste the playlist URL and fetch its complete contents. Years come from Spotify's album `release_date` and can still be edited before PDF generation.
+
+For local use, Spotify requires an explicit loopback address such as
+`http://127.0.0.1:8501`; `localhost` is not accepted.
 
 ---
 
@@ -184,8 +200,8 @@ Spotify metadata sometimes shows remaster/re-release years instead of the origin
 ## 🖨️ Printing Instructions
 
 1. Print the PDF **double-sided** (flip on long edge).
-2. Cut along the gaps (2 mm spacing).
-3. Each card is **5 × 5 cm**.
+2. Cut along the evenly distributed gaps between the cards.
+3. Each card is **6.5 × 6.5 cm**, with 12 cards per A4 sheet (3 across × 4 down).
 
 > **Tip:** Use "Actual size" in your printer settings (not "Fit to page") so QR codes scan correctly.
 
