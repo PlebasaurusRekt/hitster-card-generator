@@ -31,12 +31,14 @@ from reportlab.lib.utils import ImageReader
 from reportlab.lib.units import cm
 
 from src.http_client import (
-    get_bounded_https_content, get_http_session, get_spotify_html,
+    MAX_SPOTIFY_HTML_BYTES, get_bounded_https_content, get_http_session,
+    get_spotify_html,
 )
 from src.input_validation import (
     MAX_TRACK_LINKS, InputValidationError, canonicalize_spotify_url,
 )
 
+UTILS_API_VERSION = 1
 CARD_PHYSICAL_SIZE_CM = 6.5
 DEFAULT_QR_CODE_SIZE_CM = 2.5
 DEFAULT_QR_BORDER_CM = 0.1
@@ -2070,27 +2072,74 @@ def create_solution_side_in_memory(
     return img
 
 
-def _fetch_public_track_metadata(url):
-    html_text, canonical_url = get_spotify_html(
-        url, expected_kind='track'
+def _fetch_spotify_embed_metadata(canonical_url):
+    """Return track metadata from Spotify's bounded public embed page."""
+    spotify_id = canonical_url.rsplit('/', 1)[-1]
+    embed_url = f"https://open.spotify.com/embed/track/{spotify_id}"
+    body, _, _ = get_bounded_https_content(
+        embed_url,
+        allowed_hosts={'open.spotify.com'},
+        max_bytes=MAX_SPOTIFY_HTML_BYTES,
     )
-    soup = BeautifulSoup(html_text, 'html.parser')
-    title_tag = soup.find('meta', property='og:title')
-    description_tag = soup.find('meta', property='og:description')
-    if not title_tag or not description_tag:
-        raise ValueError("Missing metadata tags")
+    soup = BeautifulSoup(body.decode('utf-8', errors='replace'), 'html.parser')
+    data_tag = soup.find('script', id='__NEXT_DATA__')
+    if data_tag is None:
+        raise ValueError("Missing Spotify embed metadata")
 
-    title = title_tag.get('content', '').strip()
-    description = description_tag.get('content', '')
-    artist = description.split(' · ')[0].strip()
+    payload = json.loads(data_tag.get_text())
+    entity = payload['props']['pageProps']['state']['data']['entity']
+    if entity.get('type') != 'track' or entity.get('id') != spotify_id:
+        raise ValueError("Spotify embed returned an unexpected track")
+
+    title = str(entity.get('name') or '').strip()
+    artist = ', '.join(
+        str(item.get('name') or '').strip()
+        for item in entity.get('artists') or []
+        if str(item.get('name') or '').strip()
+    )
+    release_date = entity.get('releaseDate') or {}
+    release_text = str(release_date.get('isoString') or '')
+    try:
+        original_year = _validate_year(int(release_text[:4]))
+    except ValueError:
+        original_year = None
+    if not title or not artist:
+        raise ValueError("Incomplete Spotify embed metadata")
+    return title, artist, original_year
+
+
+def _fetch_public_track_metadata(url):
+    canonical_url = canonicalize_spotify_url(url, expected_kind='track')
+    try:
+        html_text, canonical_url = get_spotify_html(
+            canonical_url, expected_kind='track'
+        )
+    except requests.RequestException:
+        title, artist, original_year = _fetch_spotify_embed_metadata(
+            canonical_url
+        )
+    else:
+        soup = BeautifulSoup(html_text, 'html.parser')
+        title_tag = soup.find('meta', property='og:title')
+        description_tag = soup.find('meta', property='og:description')
+        if title_tag and description_tag:
+            title = title_tag.get('content', '').strip()
+            description = description_tag.get('content', '')
+            artist = description.split(' · ')[0].strip()
+            original_year = None
+        else:
+            title, artist, original_year = _fetch_spotify_embed_metadata(
+                canonical_url
+            )
+
     if not title or not artist:
         raise ValueError("Incomplete metadata")
 
-    year, year_source = get_year_and_source(title, artist, None)
+    year, year_source = get_year_and_source(title, artist, original_year)
     return {
         'name': sanitize_name(title),
         'original_name': title,
-        'original_year': None,
+        'original_year': original_year,
         'year': year,
         'year_source': year_source,
         'artist': artist,

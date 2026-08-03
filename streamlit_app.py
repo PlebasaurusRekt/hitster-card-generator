@@ -1,3 +1,4 @@
+import importlib
 import urllib.parse
 import uuid
 
@@ -5,6 +6,10 @@ import streamlit as st
 import pandas as pd
 import src.input_validation as input_validation
 import src.utils as utils
+
+EXPECTED_UTILS_API_VERSION = 1
+if getattr(utils, 'UTILS_API_VERSION', 0) < EXPECTED_UTILS_API_VERSION:
+    utils = importlib.reload(utils)
 
 
 # Per-session default for the year-color gradient. Settings are kept in
@@ -740,12 +745,16 @@ if st.button("🔍 Fetch Song Metadata", type="primary"):
                             f"Found {len(track_links)} tracks. "
                             "Scraping metadata..."
                         )
-                        scrape_errors = []
                         songs = utils.fetch_no_api_data_from_list(
                             track_links,
                             progress_bar,
-                            errors_out=scrape_errors,
                         )
+                        if not songs:
+                            raise utils.SpotifyAPIError(
+                                "No track metadata could be fetched from "
+                                "Spotify's public pages."
+                            )
+                        skipped_track_count = len(track_links) - len(songs)
                     except utils.SpotifyAPIError as exc:
                         status.update(
                             label="Public playlist fetch failed",
@@ -753,20 +762,24 @@ if st.button("🔍 Fetch Song Metadata", type="primary"):
                         )
                         st.error(str(exc))
                         st.stop()
-                    if scrape_errors:
+                    if skipped_track_count:
                         st.warning(
-                            f"{len(scrape_errors)} track(s) were skipped "
+                            f"{skipped_track_count} track(s) were skipped "
                             "because Spotify returned incomplete metadata."
                         )
             else:
                 st.write("Scraping track metadata...")
-                scrape_errors = []
                 try:
                     songs = utils.fetch_no_api_data_from_list(
                         input_data,
                         progress_bar,
-                        errors_out=scrape_errors,
                     )
+                    if not songs:
+                        raise utils.SpotifyAPIError(
+                            "No track metadata could be fetched from "
+                            "Spotify's public pages."
+                        )
+                    skipped_track_count = len(input_data) - len(songs)
                 except utils.SpotifyAPIError as exc:
                     status.update(
                         label="Track metadata fetch failed",
@@ -774,9 +787,9 @@ if st.button("🔍 Fetch Song Metadata", type="primary"):
                     )
                     st.error(str(exc))
                     st.stop()
-                if scrape_errors:
+                if skipped_track_count:
                     st.warning(
-                        f"{len(scrape_errors)} track(s) were skipped "
+                        f"{skipped_track_count} track(s) were skipped "
                         "because Spotify returned incomplete metadata."
                     )
 

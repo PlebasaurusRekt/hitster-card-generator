@@ -5,6 +5,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import requests
+
 import src.utils as utils
 from src import hitster_card_creator as cli
 
@@ -17,6 +19,62 @@ def track_url(last_digit):
 
 
 class MetadataTests(unittest.TestCase):
+    def test_public_track_metadata_uses_embed_fallback(self):
+        url = track_url(0)
+        payload = {
+            "props": {
+                "pageProps": {
+                    "state": {
+                        "data": {
+                            "entity": {
+                                "type": "track",
+                                "id": url.rsplit("/", 1)[-1],
+                                "name": "Wrecking Ball",
+                                "artists": [{"name": "Miley Cyrus"}],
+                                "releaseDate": {
+                                    "isoString": "2013-10-04T00:00:00Z"
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        html = (
+            '<script id="__NEXT_DATA__" type="application/json">'
+            f"{json.dumps(payload)}"
+            "</script>"
+        ).encode()
+
+        with (
+            patch(
+                "src.utils.get_spotify_html",
+                side_effect=requests.HTTPError("HTTP 500"),
+            ),
+            patch(
+                "src.utils.get_bounded_https_content",
+                return_value=(html, "embed-url", 200),
+            ) as embed_fetch,
+            patch(
+                "src.utils.get_year_and_source",
+                return_value=(2013, "Spotify"),
+            ) as year_fetch,
+        ):
+            song = utils._fetch_public_track_metadata(url)
+
+        self.assertEqual(song["original_name"], "Wrecking Ball")
+        self.assertEqual(song["artist"], "Miley Cyrus")
+        self.assertEqual(song["original_year"], 2013)
+        self.assertEqual(song["link"], url)
+        year_fetch.assert_called_once_with(
+            "Wrecking Ball", "Miley Cyrus", 2013
+        )
+        embed_fetch.assert_called_once_with(
+            url.replace("/track/", "/embed/track/"),
+            allowed_hosts={"open.spotify.com"},
+            max_bytes=utils.MAX_SPOTIFY_HTML_BYTES,
+        )
+
     def test_concurrent_fetch_preserves_input_order_and_reports_errors(self):
         urls = [track_url(index) for index in range(4)]
 
