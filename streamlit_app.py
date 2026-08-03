@@ -1,9 +1,11 @@
-import html
+import urllib.parse
+import uuid
 
 import streamlit as st
-from PIL import Image
 import pandas as pd
+import src.input_validation as input_validation
 import src.utils as utils
+
 
 # Per-session default for the year-color gradient. Settings are kept in
 # st.session_state (per user) rather than a shared module global to avoid
@@ -30,6 +32,7 @@ if "pdf_data" not in st.session_state:
 
 def reset_generation():
     st.session_state.pdf_data = None
+    st.session_state.pop('pdf_fingerprint', None)
 
 
 def font_weight_selectbox(label, default, key):
@@ -55,65 +58,20 @@ def set_example_links():
     reset_generation()
 
 def parse_input(text):
-    if not text or not text.strip():
-        return 'empty', None
-    
-    lines = [l.strip() for l in text.split('\n') if l.strip()]
-    if not lines:
-        return 'empty', None
-
-    if len(lines) == 1 and '/playlist/' in lines[0]:
-        return 'playlist', lines[0]
-    
-    track_lines = [l for l in lines if '/track/' in l]
-    if track_lines:
-        return 'tracks', track_lines
-    
-    return 'empty', None
+    try:
+        return input_validation.classify_spotify_input(text)
+    except input_validation.InputValidationError as exc:
+        return 'invalid', str(exc)
 
 
 def default_spotify_redirect_uri():
-    """Return the current app URL in Spotify-compatible form."""
-    url = str(st.context.url).split('?', 1)[0].rstrip('/')
+    """Return the exact current app URL in Spotify-compatible form."""
+    url = str(st.context.url).split('?', 1)[0].split('#', 1)[0]
+    parsed = urllib.parse.urlsplit(url)
+    if not parsed.path:
+        url += '/'
     return url.replace('://localhost', '://127.0.0.1', 1)
 
-
-def render_spotify_authorize_button(url):
-    """Render OAuth navigation outside frames that Spotify refuses to use."""
-    safe_url = html.escape(str(url), quote=True)
-    st.markdown(
-        f"""
-        <a href="{safe_url}" target="_blank" rel="noopener noreferrer"
-           class="spotify-authorize-button">
-            Authorize with Spotify
-        </a>
-        <style>
-            .spotify-authorize-button {{
-                align-items: center;
-                background: #1db954;
-                border: 1px solid rgba(255, 255, 255, 0.2);
-                border-radius: 0.5rem;
-                color: #ffffff !important;
-                display: inline-flex;
-                font-size: 1rem;
-                font-weight: 600;
-                justify-content: center;
-                line-height: 1.6;
-                min-height: 2.5rem;
-                padding: 0.25rem 0.75rem;
-                text-decoration: none !important;
-            }}
-            .spotify-authorize-button:hover {{
-                background: #1ed760;
-                border-color: rgba(255, 255, 255, 0.35);
-            }}
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-import uuid
 
 def add_color_cb(key_prefix):
     st.session_state[f"{key_prefix}_items"].append({"id": str(uuid.uuid4()), "color": "#FFFFFF"})
@@ -148,7 +106,6 @@ def dynamic_color_list(key_prefix, title, default_colors, help_text=""):
             
             # Parse color string
             hex_c = color[:7] if len(color) >= 7 else "#000000"
-            alpha = int(color[7:9], 16) if len(color) == 9 else 255
             
             col1, col2, col3, col4 = st.columns([5, 1, 1, 1])
             with col1:
@@ -173,6 +130,20 @@ def dynamic_color_list(key_prefix, title, default_colors, help_text=""):
 # --- UI INTERFACE ---
 st.set_page_config(page_title="Hitster Generator", page_icon="🎵", layout="wide", initial_sidebar_state="expanded")
 
+spotify_redirect_default = default_spotify_redirect_uri()
+spotify_client_id = str(
+    st.session_state.get('spotify_client_id', '') or ''
+).strip()
+spotify_client_secret = str(
+    st.session_state.get('spotify_client_secret', '') or ''
+).strip()
+spotify_redirect_uri = str(
+    st.session_state.get(
+        'spotify_redirect_uri', spotify_redirect_default
+    ) or spotify_redirect_default
+).strip()
+
+spotify_callback_pending = None
 spotify_callback_code = st.query_params.get('code')
 spotify_callback_state = st.query_params.get('state')
 spotify_callback_error = st.query_params.get('error')
@@ -184,18 +155,47 @@ if spotify_callback_error:
     )
     st.query_params.clear()
 elif spotify_callback_code:
-    try:
-        st.session_state.spotify_auth = utils.complete_spotify_oauth(
-            spotify_callback_code, spotify_callback_state
-        )
-        st.session_state.pop('spotify_oauth_url', None)
-        st.session_state.spotify_oauth_notice = (
-            'success', 'Spotify account connected successfully.'
-        )
-    except utils.SpotifyAPIError as exc:
-        st.session_state.pop('spotify_oauth_url', None)
-        st.session_state.spotify_oauth_notice = ('error', str(exc))
-    st.query_params.clear()
+    callback_completed = False
+    callback_failure = None
+    if spotify_client_id and spotify_client_secret:
+        try:
+            st.session_state.spotify_auth = utils.complete_spotify_oauth(
+                spotify_callback_code,
+                spotify_callback_state,
+                spotify_client_id,
+                spotify_client_secret,
+            )
+        except utils.SpotifyAPIError as exc:
+            callback_failure = str(exc)
+        else:
+            callback_completed = True
+            st.session_state.pop('spotify_oauth_url', None)
+            st.session_state.spotify_oauth_notice = (
+                'success', 'Spotify account connected successfully.'
+            )
+            st.query_params.clear()
+
+    if not callback_completed:
+        try:
+            callback_hints = utils.inspect_spotify_oauth_state(
+                spotify_callback_state
+            )
+        except utils.SpotifyAPIError as exc:
+            st.session_state.pop('spotify_oauth_url', None)
+            st.session_state.spotify_oauth_notice = ('error', str(exc))
+            st.query_params.clear()
+        else:
+            spotify_callback_pending = {
+                'code': spotify_callback_code,
+                'state': spotify_callback_state,
+                **callback_hints,
+            }
+            if callback_failure:
+                st.session_state.spotify_oauth_notice = (
+                    'error',
+                    f"{callback_failure} Re-enter your Spotify credentials "
+                    "to try again.",
+                )
 
 spotify_oauth_notice = st.session_state.pop('spotify_oauth_notice', None)
 
@@ -215,7 +215,11 @@ with st.sidebar:
             "Starting Card Number", min_value=1, value=1, step=1,
             help="Cards are numbered automatically from this value."
         )
-        
+        card_label = st.text_input(
+            "Card Label",
+            help="Optional set name printed on both sides of each card.",
+        )
+
         font_choice = st.selectbox("Font Selection", ["Montserrat", "Oswald", "Roboto", "Dancing Script", "Pacifico", "Custom..."])
         if font_choice == "Custom...":
             google_font = st.text_input("Custom Google Font Name", value=st.session_state.get('google_font', "Montserrat"),
@@ -244,11 +248,15 @@ with st.sidebar:
         st.divider()
 
         with st.expander(
-            "🔑 Connect Spotify", expanded=spotify_oauth_notice is not None
+            "🔑 Connect Spotify",
+            expanded=(
+                spotify_oauth_notice is not None
+                or spotify_callback_pending is not None
+            ),
         ):
             st.caption(
-                "User authorization enables complete owned/collaborative playlists "
-                "and Spotify album release years."
+                "Use your own Spotify developer app to authorize private and "
+                "collaborative playlists."
             )
             if spotify_oauth_notice:
                 notice_type, notice_text = spotify_oauth_notice
@@ -261,56 +269,155 @@ with st.sidebar:
             if spotify_auth:
                 st.success("Connected with Spotify user authorization")
                 if st.button("Disconnect Spotify"):
-                    st.session_state.pop('spotify_auth', None)
-                    st.session_state.pop('spotify_oauth_url', None)
+                    for session_key in (
+                        'spotify_auth',
+                        'spotify_client_id',
+                        'spotify_client_secret',
+                        'spotify_redirect_uri',
+                        'spotify_oauth_url',
+                    ):
+                        st.session_state.pop(session_key, None)
                     st.rerun()
-            else:
-                redirect_default = default_spotify_redirect_uri()
-                with st.form("spotify_oauth_credentials"):
-                    spotify_client_id = st.text_input(
-                        "Client ID", type="password"
+            elif spotify_callback_pending:
+                st.info(
+                    "Spotify returned to the app. Enter the same Client Secret "
+                    "once to verify the signed login and finish connecting."
+                )
+                st.caption("Redirect URI used for this login:")
+                st.code(
+                    spotify_callback_pending['redirect_uri'],
+                    language=None,
+                )
+                with st.form("spotify_callback_credentials"):
+                    callback_client_id = st.text_input(
+                        "Client ID",
+                        value=spotify_callback_pending['client_id'],
                     )
-                    spotify_client_secret = st.text_input(
-                        "Client Secret", type="password"
+                    callback_client_secret = st.text_input(
+                        "Client Secret",
+                        type="password",
                     )
-                    spotify_redirect_uri = st.text_input(
-                        "Redirect URI", value=redirect_default,
-                        help=(
-                            "Add this exact URI to the allowlist in your Spotify "
-                            "Developer Dashboard app settings."
-                        ),
+                    finish_spotify_oauth = st.form_submit_button(
+                        "Finish Spotify Connection",
+                        type="primary",
                     )
-                    prepare_spotify_login = st.form_submit_button(
-                        "Prepare Spotify Login", type="primary"
-                    )
-
-                if prepare_spotify_login:
-                    st.session_state.pop('spotify_oauth_url', None)
+                if finish_spotify_oauth:
                     try:
-                        st.session_state.spotify_oauth_url = (
-                            utils.begin_spotify_oauth(
-                                spotify_client_id, spotify_client_secret,
-                                spotify_redirect_uri,
-                            )
+                        spotify_auth = utils.complete_spotify_oauth(
+                            spotify_callback_pending['code'],
+                            spotify_callback_pending['state'],
+                            callback_client_id,
+                            callback_client_secret,
                         )
                     except utils.SpotifyAPIError as exc:
                         st.error(str(exc))
+                    else:
+                        st.session_state.spotify_auth = spotify_auth
+                        st.session_state.spotify_client_id = (
+                            callback_client_id.strip()
+                        )
+                        st.session_state.spotify_client_secret = (
+                            callback_client_secret.strip()
+                        )
+                        st.session_state.spotify_redirect_uri = (
+                            spotify_callback_pending['redirect_uri']
+                        )
+                        st.session_state.pop('spotify_oauth_url', None)
+                        st.session_state.spotify_oauth_notice = (
+                            'success',
+                            'Spotify account connected successfully.',
+                        )
+                        st.query_params.clear()
+                        st.rerun()
 
-                spotify_oauth_url = st.session_state.get('spotify_oauth_url')
+                if st.button("Cancel and start again"):
+                    for session_key in (
+                        'spotify_client_id',
+                        'spotify_client_secret',
+                        'spotify_redirect_uri',
+                        'spotify_oauth_url',
+                    ):
+                        st.session_state.pop(session_key, None)
+                    st.query_params.clear()
+                    st.rerun()
+            else:
+                st.markdown(
+                    "[Open the Spotify Developer Dashboard]"
+                    "(https://developer.spotify.com/dashboard)"
+                )
+                with st.form("spotify_credentials"):
+                    entered_client_id = st.text_input(
+                        "Client ID",
+                        value=spotify_client_id,
+                    )
+                    entered_client_secret = st.text_input(
+                        "Client Secret",
+                        type="password",
+                    )
+                    entered_redirect_uri = st.text_input(
+                        "Redirect URI",
+                        value=spotify_redirect_uri,
+                        help=(
+                            "Register this exact URI in your Spotify app "
+                            "settings before authorizing."
+                        ),
+                    )
+                    prepare_spotify_oauth = st.form_submit_button(
+                        "Prepare Spotify Login",
+                        type="primary",
+                    )
+
+                if prepare_spotify_oauth:
+                    try:
+                        spotify_oauth_url = utils.begin_spotify_oauth(
+                            entered_client_id,
+                            entered_client_secret,
+                            entered_redirect_uri,
+                        )
+                    except utils.SpotifyAPIError as exc:
+                        st.error(str(exc))
+                    else:
+                        spotify_client_id = entered_client_id.strip()
+                        spotify_client_secret = entered_client_secret.strip()
+                        spotify_redirect_uri = entered_redirect_uri.strip()
+                        st.session_state.spotify_client_id = (
+                            spotify_client_id
+                        )
+                        st.session_state.spotify_client_secret = (
+                            spotify_client_secret
+                        )
+                        st.session_state.spotify_redirect_uri = (
+                            spotify_redirect_uri
+                        )
+                        st.session_state.spotify_oauth_url = spotify_oauth_url
+
+                spotify_oauth_url = st.session_state.get(
+                    'spotify_oauth_url'
+                )
                 if spotify_oauth_url:
                     st.info(
-                        "Confirm the Redirect URI is registered in Spotify, then "
-                        "continue in the new tab. Spotify will return that tab to "
-                        "this app after you approve access."
+                        "Spotify opens as a top-level page and returns here "
+                        "after you approve access."
                     )
-                    render_spotify_authorize_button(spotify_oauth_url)
-        
+                    st.link_button(
+                        "Authorize with Spotify",
+                        spotify_oauth_url,
+                        type="primary",
+                    )
+
+                st.caption(
+                    "Your credentials are kept only in this Streamlit session "
+                    "for login and token refresh. The Client Secret is never "
+                    "put in the OAuth URL. A fresh callback session will ask "
+                    "for it once more."
+                )
+
         st.divider()
         st.header("Feedback")
         st.write("Found a bug or have a feature idea? Let me know on GitHub!")
         st.link_button(
             label="Open GitHub Issues", 
-            url="https://github.com/WhiteShunpo/hitster-cards-generator/issues",
+            url="https://github.com/PlebasaurusRekt/hitster-card-generator/issues",
             type="secondary",
         )
 
@@ -336,7 +443,13 @@ with st.sidebar:
         if qr_bg_type == "image":
             qr_bg_upload = st.file_uploader("Upload Image (QR Side)", type=["png", "jpg", "jpeg"], key="qr_bg_up")
             if qr_bg_upload:
-                st.session_state.qr_bg_img = Image.open(qr_bg_upload)
+                try:
+                    st.session_state.qr_bg_img = (
+                        input_validation.load_uploaded_image(qr_bg_upload)
+                    )
+                except input_validation.InputValidationError as exc:
+                    st.session_state.qr_bg_img = None
+                    st.error(str(exc))
             else:
                 st.session_state.qr_bg_img = None
             
@@ -351,7 +464,7 @@ with st.sidebar:
             neon_hex_list = dynamic_color_list("neon", "Neon Ring Colors", ["#FF0064", "#00C8FF", "#00FF78", "#FFFF00"])
             try:
                 st.session_state.neon_colors = [tuple(int(val * 255) for val in utils.to_rgba(c)) for c in neon_hex_list]
-            except:
+            except (TypeError, ValueError):
                 st.session_state.neon_colors = [(255, 0, 100), (0, 200, 255), (0, 255, 120), (255, 255, 0)]
                 
         st.subheader("📱 QR Settings")
@@ -412,7 +525,13 @@ with st.sidebar:
         if not sol_color_wash_enabled and sol_bg_type == "image":
             sol_bg_upload = st.file_uploader("Upload Image (Solution Side)", type=["png", "jpg", "jpeg"], key="sol_bg_up")
             if sol_bg_upload:
-                st.session_state.sol_bg_img = Image.open(sol_bg_upload)
+                try:
+                    st.session_state.sol_bg_img = (
+                        input_validation.load_uploaded_image(sol_bg_upload)
+                    )
+                except input_validation.InputValidationError as exc:
+                    st.session_state.sol_bg_img = None
+                    st.error(str(exc))
             else:
                 st.session_state.sol_bg_img = None
                 
@@ -443,6 +562,7 @@ with st.sidebar:
         "ink_saving_mode": ink_mode,
         "card_draw_border": border_mode,
         "card_number_start": int(card_number_start),
+        "card_label": card_label,
         "google_font": google_font,
         "card_number_font_weight": card_number_font_weight,
         "card_set_title_font_weight": card_set_title_font_weight,
@@ -546,6 +666,7 @@ user_input = st.text_area(
     "Paste Spotify links here:", 
     height=200, 
     key="user_input",
+    max_chars=input_validation.MAX_INPUT_CHARS,
     placeholder="https://open.spotify.com/track/...\nor\nhttps://open.spotify.com/playlist/...",
     on_change=reset_generation,
 )
@@ -557,6 +678,8 @@ if input_type == 'playlist':
     st.success("🎶 Spotify **playlist** URL detected!")
 elif input_type == 'tracks':
     st.success(f"🎵 {len(input_data)} Spotify **track link(s)** detected.")
+elif input_type == 'invalid':
+    st.error(input_data)
 else:
     st.warning("No valid Spotify links detected yet.")
 
@@ -565,6 +688,8 @@ else:
 if st.button("🔍 Fetch Song Metadata", type="primary"):
     if input_type == 'empty':
         st.error("Please paste some valid Spotify links first!")
+    elif input_type == 'invalid':
+        st.error(input_data)
     else:
         with st.status("Fetching metadata...", expanded=True) as status:
             progress_bar = st.progress(0, text="Starting...")
@@ -575,7 +700,11 @@ if st.button("🔍 Fetch Song Metadata", type="primary"):
                 if spotify_auth:
                     st.write("Fetching the complete playlist from Spotify...")
                     try:
-                        access_token = utils.get_spotify_access_token(spotify_auth)
+                        access_token = utils.get_spotify_access_token(
+                            spotify_auth,
+                            spotify_client_id,
+                            spotify_client_secret,
+                        )
                         playlist_data = utils.fetch_spotify_playlist_with_token(
                             playlist_url, access_token
                         )
@@ -586,24 +715,70 @@ if st.button("🔍 Fetch Song Metadata", type="primary"):
                             )
                         st.session_state.spotify_auth = spotify_auth
                         progress_bar.progress(1.0, text="Done!")
+                    except utils.SpotifyAuthenticationError as exc:
+                        st.session_state.pop('spotify_auth', None)
+                        status.update(
+                            label="Spotify authorization expired",
+                            state="error",
+                        )
+                        st.error(str(exc))
+                        st.stop()
                     except utils.SpotifyAPIError as exc:
-                        status.update(label="Spotify playlist fetch failed", state="error")
+                        status.update(
+                            label="Spotify playlist fetch failed",
+                            state="error",
+                        )
                         st.error(str(exc))
                         st.stop()
                 else:
                     st.write("Scraping playlist page for track links...")
-                    track_links = utils.scrape_playlist_track_links(playlist_url)
-                    if not track_links:
-                        st.error(
-                            "Could not extract tracks from the public playlist page. "
-                            "Connect Spotify or paste individual track links instead."
+                    try:
+                        track_links = utils.scrape_playlist_track_links(
+                            playlist_url
                         )
+                        st.write(
+                            f"Found {len(track_links)} tracks. "
+                            "Scraping metadata..."
+                        )
+                        scrape_errors = []
+                        songs = utils.fetch_no_api_data_from_list(
+                            track_links,
+                            progress_bar,
+                            errors_out=scrape_errors,
+                        )
+                    except utils.SpotifyAPIError as exc:
+                        status.update(
+                            label="Public playlist fetch failed",
+                            state="error",
+                        )
+                        st.error(str(exc))
                         st.stop()
-                    st.write(f"Found {len(track_links)} tracks. Scraping metadata...")
-                    songs = utils.fetch_no_api_data_from_list(track_links, progress_bar)
+                    if scrape_errors:
+                        st.warning(
+                            f"{len(scrape_errors)} track(s) were skipped "
+                            "because Spotify returned incomplete metadata."
+                        )
             else:
                 st.write("Scraping track metadata...")
-                songs = utils.fetch_no_api_data_from_list(input_data, progress_bar)
+                scrape_errors = []
+                try:
+                    songs = utils.fetch_no_api_data_from_list(
+                        input_data,
+                        progress_bar,
+                        errors_out=scrape_errors,
+                    )
+                except utils.SpotifyAPIError as exc:
+                    status.update(
+                        label="Track metadata fetch failed",
+                        state="error",
+                    )
+                    st.error(str(exc))
+                    st.stop()
+                if scrape_errors:
+                    st.warning(
+                        f"{len(scrape_errors)} track(s) were skipped "
+                        "because Spotify returned incomplete metadata."
+                    )
 
             status.update(label=f"✅ Fetched {len(songs)} songs!", state="complete")
             progress_bar.empty()
@@ -621,7 +796,6 @@ if songs:
                "Songs with unknown years show as empty — fill them in!")
 
     # Build an editable dataframe
-    import pandas as pd
     df = pd.DataFrame([
         {
             "Artist": s['artist'],
@@ -648,6 +822,18 @@ if songs:
         num_rows="fixed",
         hide_index=True,
     )
+
+    current_pdf_fingerprint = utils.build_generation_fingerprint(
+        edited_df.to_dict(orient='records'),
+        st.session_state.get('design_settings', {}),
+    )
+    if (
+        st.session_state.get('pdf_data') is not None
+        and st.session_state.get('pdf_fingerprint')
+        != current_pdf_fingerprint
+    ):
+        st.session_state.pdf_data = None
+        st.session_state.pop('pdf_fingerprint', None)
 
     # Count problems
     unknown_count = edited_df['Year'].isna().sum()
@@ -676,24 +862,58 @@ if songs:
     settings = st.session_state.get('design_settings')
     preview_card_number = settings.get('card_number_start', 1) + int(preview_idx)
 
+    link_str = (
+        str(preview_song['Link'])
+        if pd.notna(preview_song['Link'])
+        else "https://open.spotify.com/"
+    )
+    preview_render_fingerprint = utils.build_generation_fingerprint(
+        {
+            'artist': str(preview_song['Artist']),
+            'song': str(preview_song['Song']),
+            'year': preview_year,
+            'link': link_str,
+            'all_years': valid_preview_years,
+            'card_number': preview_card_number,
+        },
+        settings,
+    )
+    if (
+        st.session_state.get('preview_render_fingerprint')
+        != preview_render_fingerprint
+    ):
+        qr_img = utils.create_qr_code(link_str)
+        st.session_state.preview_qr_card = (
+            utils.create_qr_with_neon_rings_in_memory(
+                qr_img,
+                seed=utils.stable_seed(link_str),
+                settings_override=settings,
+                card_number=preview_card_number,
+            )
+        )
+        st.session_state.preview_solution_card = (
+            utils.create_solution_side_in_memory(
+                str(preview_song['Song']),
+                str(preview_song['Artist']),
+                preview_year,
+                valid_preview_years,
+                settings_override=settings,
+                card_number=preview_card_number,
+            )
+        )
+        st.session_state.preview_render_fingerprint = (
+            preview_render_fingerprint
+        )
+
     pcol1, pcol2 = st.columns(2)
     with pcol1:
         st.caption("QR Side")
-        link_str = str(preview_song['Link']) if pd.notna(preview_song['Link']) else "https://open.spotify.com/"
-        qr_img = utils.create_qr_code(link_str)
-        qr_card = utils.create_qr_with_neon_rings_in_memory(
-            qr_img, seed=hash(link_str), settings_override=settings,
-            card_number=preview_card_number
-        )
-        st.image(qr_card, width="stretch")
+        st.image(st.session_state.preview_qr_card, width="stretch")
     with pcol2:
         st.caption("Solution Side")
-        sol_card = utils.create_solution_side_in_memory(
-            str(preview_song['Song']), str(preview_song['Artist']),
-            preview_year, valid_preview_years, settings_override=settings,
-            card_number=preview_card_number
+        st.image(
+            st.session_state.preview_solution_card, width="stretch"
         )
-        st.image(sol_card, width="stretch")
 
     # --- STEP 3: GENERATE PDF ---
     st.divider()
@@ -713,12 +933,15 @@ if songs:
             if pd.notna(new_link):
                 song['link'] = str(new_link)
 
+            previous_year = song.get('year')
             if pd.notna(new_year):
                 song['year'] = int(new_year)
-                if int(new_year) != (songs[i].get('year') or 0):
+                if song['year'] != previous_year:
                     song['year_source'] = 'Manual'
             else:
                 song['year'] = None
+                if previous_year is not None:
+                    song['year_source'] = 'Manual'
 
         with st.status("Generating cards...", expanded=True) as status:
             progress_bar = st.progress(0, text="Starting PDF generation...")
@@ -727,6 +950,12 @@ if songs:
             progress_bar.empty()
 
         st.session_state.pdf_data = pdf_data
+        st.session_state.pdf_fingerprint = (
+            utils.build_generation_fingerprint(
+                edited_df.to_dict(orient='records'),
+                st.session_state.get('design_settings', {}),
+            )
+        )
         st.balloons()
 
     # Show download button if PDF exists

@@ -7,9 +7,17 @@ Generate custom Hitster-style music game cards from Spotify playlists.
 
 import os
 import json
+import re
+import sys
 import argparse
 from dotenv import load_dotenv
-import utils
+if __package__:
+    from . import utils
+else:
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+    from src import utils
 
 # =============================================================================
 # CONFIGURATION
@@ -48,69 +56,83 @@ db = {"fonts_dict": FONT_PATHS,
       "color_gradient": COLOR_GRADIENT,
       "card_size": CARD_SIZE,
       "neon_colors": NEON_COLORS}
-utils.db = db 
 
 # =============================================================================
 # FINAL INTEGRATED PIPELINE
 # =============================================================================
 
-def generate_hitster_cards(db, playlist_url=None, client_id=None, client_secret=None, output_dir="hitster_cards", fetch=False, card_label=None):
+def generate_hitster_cards(
+    settings, playlist_url=None, output_dir="hitster_cards", fetch=False
+):
+    """Load public Spotify metadata, render cards, and create the PDF."""
     print("=== Hitster Card Generator ===\n")
     full_output_path = os.path.join(OUTPUT_DIR, output_dir)
     os.makedirs(full_output_path, exist_ok=True)
-    json_file = os.path.join(OUTPUT_DIR, output_dir, "songs.json")
-    
-    songs = []
+    json_file = os.path.join(full_output_path, "songs.json")
 
-    # --- DATA FETCHING LOGIC ---
     if not fetch and os.path.exists(json_file):
         print(f"Step 1: Loading local data from {json_file}...")
-        with open(json_file, 'r', encoding='utf-8') as f:
-            songs = json.load(f)
-            
+        with open(json_file, 'r', encoding='utf-8') as file_handle:
+            songs = json.load(file_handle)
     elif os.path.exists(LINKS_FILE):
-        print(f"Step 1: No JSON found. Using {LINKS_FILE} (Scraper Mode)...")
+        print(f"Step 1: Using {LINKS_FILE} (public scraper mode)...")
         songs = utils.fetch_no_api_data(LINKS_FILE)
-        
-        with open(json_file, 'w', encoding='utf-8') as f:
-            json.dump(songs, f, indent=2)
-
-    elif client_id and client_secret and playlist_url:
-        print("Step 1: Fetching from Spotify API...")
-        playlist_data = utils.fetch_spotify_playlist(playlist_url, client_id, client_secret)
-        songs = utils.parse_playlist_data(playlist_data)
-        
-        with open(json_file, 'w', encoding='utf-8') as f:
-            json.dump(songs, f, indent=2)
+    elif playlist_url:
+        print("Step 1: Scraping the public Spotify playlist...")
+        track_links = utils.scrape_playlist_track_links(playlist_url)
+        songs = utils.fetch_no_api_data_from_list(track_links)
     else:
-        print("ERROR: No API credentials AND no links.txt found.")
-        return
-    
+        raise utils.SpotifyAPIError(
+            "No cached songs.json, links.txt, or PLAYLIST_URL was found."
+        )
 
-    # --- CARD GENERATION ---
+    if not isinstance(songs, list) or not songs:
+        raise utils.SpotifyAPIError("No usable songs were found.")
+    if fetch or not os.path.exists(json_file):
+        with open(json_file, 'w', encoding='utf-8') as file_handle:
+            json.dump(songs, file_handle, indent=2)
+
+    card_pattern = re.compile(
+        r'^card_[0-9]+_(?:qr|solution)[.]png$'
+    )
+    for filename in os.listdir(full_output_path):
+        if card_pattern.fullmatch(filename):
+            os.remove(os.path.join(full_output_path, filename))
+
     print(f"\nStep 2: Generating {len(songs)} cards...")
     release_years = [song['year'] for song in songs]
-    for i, song in enumerate(songs):
-        card_number = int(db.get('card_number_start', 1)) + i
-        qr_path = os.path.join(full_output_path, f"card_{card_number:03d}_qr.png")
-        sol_path = os.path.join(
+    for index, song in enumerate(songs):
+        card_number = int(settings.get('card_number_start', 1)) + index
+        qr_path = os.path.join(
+            full_output_path, f"card_{card_number:03d}_qr.png"
+        )
+        solution_path = os.path.join(
             full_output_path, f"card_{card_number:03d}_solution.png"
         )
-        
-        qr_code = utils.create_qr_code(song['link'])
-        utils.create_qr_with_neon_rings(qr_code, qr_path, card_number=card_number)
-        utils.create_solution_side(
-            song['name'], song['artist'], song['year'], release_years, sol_path,
-            card_number=card_number
-        )
-        if (i + 1) % 20 == 0:
-            print(f"  Progress: {i+1}/{len(songs)}...")
 
-    # --- PDF CREATION ---
+        qr_code = utils.create_qr_code(song['link'])
+        utils.create_qr_with_neon_rings(
+            qr_code, qr_path, card_number=card_number,
+            settings_override=settings,
+        )
+        utils.create_solution_side(
+            song['name'],
+            song['artist'],
+            song['year'],
+            release_years,
+            solution_path,
+            card_number=card_number,
+            settings_override=settings,
+        )
+        if (index + 1) % 20 == 0:
+            print(f"  Progress: {index + 1}/{len(songs)}...")
+
     print("\nStep 3: Creating PDF...")
     pdf_path = os.path.join(OUTPUT_DIR, f"{output_dir}.pdf")
-    utils.create_cards_pdf(os.path.join(OUTPUT_DIR, output_dir), pdf_path)
+    utils.create_cards_pdf(full_output_path, pdf_path)
     print(f"\n✓ Done! PDF ready at: {pdf_path}")
+    return pdf_path
+
 
 if __name__ == "__main__":
 
@@ -132,9 +154,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     PLAYLIST_URL = os.getenv("PLAYLIST_URL", "")
-    CLIENT_ID = os.getenv("CLIENT_ID", "")
-    CLIENT_SECRET = os.getenv("CLIENT_SECRET", "")
-
     INK_SAVING_MODE = os.getenv("INK_SAVING_MODE", "False").lower() == "true"
     CARD_DRAW_BORDER = os.getenv("CARD_DRAW_BORDER", "False").lower() == "true"
     CARD_LABEL = os.getenv("CARD_LABEL", None)
@@ -175,7 +194,7 @@ if __name__ == "__main__":
     db['qr_title_pos'] = args.game_title_pos if args.game_title_pos is not None else GAME_TITLE_POS
     db['qr_title_enabled'] = bool(db['qr_title'])
 
-    print(f"Using client id {CLIENT_ID} to fetch playlist url {PLAYLIST_URL}...")
+    print(f"Playlist URL: {PLAYLIST_URL or '(using links.txt/cache)'}")
     print(f"Ink saving mode: {db['ink_saving_mode']}, Draw border: {db['card_draw_border']}, Label: {db['card_label']}\n")
 
     if args.fetch:
@@ -184,4 +203,9 @@ if __name__ == "__main__":
             os.remove(json_file)
             print(f"Removed existing {json_file}")
 
-    generate_hitster_cards(db, PLAYLIST_URL, CLIENT_ID, CLIENT_SECRET, fetch=args.fetch, card_label=db['card_label'])
+    try:
+        generate_hitster_cards(
+            db, playlist_url=PLAYLIST_URL, fetch=args.fetch
+        )
+    except utils.SpotifyAPIError as exc:
+        parser.exit(1, f"ERROR: {exc}\n")

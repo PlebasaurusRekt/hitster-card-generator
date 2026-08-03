@@ -1,246 +1,140 @@
 # Hitster Card Generator 🎵
 
-[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-Donate-orange?style=for-the-badge&logo=buy-me-a-coffee)](https://www.buymeacoffee.com/WhiteShunpo)
-[![Streamlit App](https://img.shields.io/badge/Streamlit-Live%20App-red?style=for-the-badge&logo=streamlit)](https://hitster-card-generator.streamlit.app/)
+Generate printable, duplex-ready Hitster-style cards from Spotify tracks and playlists.
 
-**Generate custom Hitster-style music game cards from any Spotify playlist!**
+[Open the live Streamlit app](https://hitster-card-generator2.streamlit.app/)
 
-Turn your favorite playlists into a physical card game. The tool creates professional cards with neon QR codes on the front and year-based coloured solution backs. It outputs a print-ready, duplex-optimised A4 PDF.
+The app creates 6.5 × 6.5 cm cards on A4 sheets (3 × 4 per page), with QR-code fronts and year-based solution backs. Preview cards stay at 2000 × 2000 pixels; PDF cards are rendered at 720 DPI.
 
-> [!IMPORTANT]
-> **2026 API Update:** Spotify has temporarily disabled "Create App" for new developer accounts.
-> **No API key? No problem.** The web app and the CLI scraper both work without one.
+## Features
 
----
+- Paste individual Spotify track links or one public playlist link.
+- Import up to 500 tracks per run.
+- Optionally connect Spotify to read complete owned or collaborative playlists.
+- Correct artists, titles, years, and links before generation.
+- Customize backgrounds, QR colors, neon rings, fonts, titles, labels, numbering, and ink-saving borders.
+- Generate a mirrored, duplex-ready PDF.
+- Use a four-module QR quiet zone with integer-aligned QR modules.
+- Upload custom images up to 10 MB; 2000 × 2000 pixels is recommended.
 
-## 👀 Preview
+## Web app
 
-| **Front (Scan to Play)** | **Back (Solutions)** |
-|:---:|:---:|
-| <img src="example_pictures/qr_code_side.png" width="400" alt="QR code side"> | <img src="example_pictures/solution_side.png" width="400" alt="Solution side"> |
-| *Randomised neon rings + Spotify QR* | *Year-based colour gradient (Purple → Blue)* |
+Use [https://hitster-card-generator2.streamlit.app/](https://hitster-card-generator2.streamlit.app/).
 
----
+1. Paste Spotify track links or one playlist share URL.
+2. Select **Fetch Song Metadata**.
+3. Review and correct the song table.
+4. Customize the cards in the sidebar.
+5. Select **Create My PDF**, then download it.
 
-## ✨ Features
+Public pages work without API credentials. If Spotify does not expose every playlist item publicly, connect Spotify or paste the individual track links.
 
-| Feature | Details |
-|---|---|
-| 🌐 **Web Interface** | [Streamlit app](https://hitster-card-generator.streamlit.app/) — paste links, review, download |
-| 🔗 **No API Key Required** | Scrapes public Spotify pages; works with individual tracks *or* playlist URLs |
-| 📋 **Playlist URL Support** | Paste a single playlist URL to import up to ~100 tracks (unlimited with API credentials) |
-| ✏️ **Manual Year Override** | Edit years in an interactive table before generating the PDF |
-| 🎨 **Neon QR Design** | Unique randomised neon rings on every card |
-| 🎯 **Smart Colours** | Dynamic gradient (Purple → Pink → Gold → Blue) mapped to release years |
-| 🎨 **Soft Color Wash** | Year-derived base colors with one randomized warm field and subtle print grain |
-| 🖨️ **Print-Ready PDF** | A4 at 720 DPI, 6.5 × 6.5 cm cards, 12 per page, duplex-optimised |
-| 💡 **Ink Saving Mode** | White background / black text toggle |
-| ✂️ **Cutting Borders** | Optional border lines for easier cutting |
-| 🏷️ **Card Labels** | Stamp each card with a custom label (event name, playlist, etc.) |
-| 🎨 **Deep Customization** | Customize background colors, neon rings, QR styles, and game titles |
-| 🖼️ **Custom Backgrounds** | Upload your own images to use as card backgrounds |
-| 📱 **Scan-Safe QR** | Choose between transparent or solid QR backgrounds for 100% scan reliability |
-| 🔤 **Game Titles** | Add custom game titles at various positions (top, bottom, vertical, etc.) |
-
----
-
-## 🎨 Card Customization
-
-You can now fully customize the look and feel of your cards in the **sidebar** of the web app:
-
-### 📱 QR Side Design
-- **Background Type:** Choose between `Neon Rings`, `Solid Color`, or `Custom Image`.
-- **Neon Rings:** Adjust thickness, color palette, and ring count.
-- **QR Background Mode:** 
-  - `Transparent`: Classic look, neon rings show through the QR code.
-  - `Solid`: Draws a backplate (square or rounded) behind the QR code for maximum scan reliability.
-- **QR Colors:** Customize module and backplate colors.
-- **QR Size:** The default QR code is 2.5 cm with a 0.1 cm border on every side, for a 2.7 cm total square.
-
-### 🔤 Game Titles & Labels
-- **Game Title:** Add a custom text like "90s Party" or "Wedding 2026".
-- **Positioning:** Position the QR-side title as needed; the solution-side title stays 0.3 cm from the top and 0.2 cm from the left.
-- **Styling:** Adjust font size, color, and background boxes for better readability.
-- **Font Weights:** Independently style card numbers, card-set names, song artists, years, and song titles from Thin (100) through Black (900). Song artists default to Medium (500), and song titles default to Light (300).
-- **Fixed Song Spacing:** Artist and title blocks keep a consistent 0.9 cm inset from the top and bottom card edges, including when text wraps.
-
-### 🎨 Solution Soft Color Wash
-
-- **Enable Soft Color Wash** is on by default in the Solution Side background settings.
-- Each card uses its year-gradient color as the base with warmer/brighter and cooler/darker companions.
-- Both fields use deliberately strong randomized separation and opacity, with their oversized centers placed near broadly opposite card edges.
-- Fine monochromatic grain gives the result a restrained, printed finish.
-
-### 🖼️ Custom Background Image
-1. Select **Background Type: Image** in the sidebar.
-2. Upload a square image (recommended: 2000x2000px).
-3. The image will be automatically cropped and resized to fit the card.
-4. **Pro Tip:** Use **Solid QR Background Mode** when using busy image backgrounds to ensure the QR code remains scannable.
-
----
-
-## 🚀 Quick Start
-
-### Option A — Web App (easiest)
-
-👉 **<https://hitster-card-generator.streamlit.app/>**
-
-1. **Copy links** — In Spotify Desktop, open your playlist, select songs (`Ctrl+A`), copy (`Ctrl+C`).
-2. **Paste** — Drop them into the text area (individual track links *or* a single playlist URL).
-3. **Review** — Check the metadata table and fix any wrong years.
-4. **Download** — Click **Create My PDF** and print double-sided.
-
-### Option B — Local CLI
+## Local setup
 
 ```bash
-git clone https://github.com/WhiteShunpo/hitster-card-generator.git
+git clone https://github.com/PlebasaurusRekt/hitster-card-generator.git
 cd hitster-card-generator
+python -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-**Scraper mode (no API key):**
+Run the web app:
 
-1. Collect links from Spotify Desktop (`Ctrl+A` → `Ctrl+C`).
-2. Save them in a file called `links.txt` in the project root.
-3. Run:
+```bash
+streamlit run streamlit_app.py
+```
+
+Run the CLI using a root-level `links.txt` file:
 
 ```bash
 python src/hitster_card_creator.py
-# With options:
-python src/hitster_card_creator.py --ink-save-mode --card-draw-border --card-label "Game Night"
-# With custom styling options:
+python src/hitster_card_creator.py --ink-save-mode --card-draw-border
+python src/hitster_card_creator.py --card-label "Game Night" --start-number 25
 python src/hitster_card_creator.py --qr-bg-mode solid --game-title "Hits"
 ```
 
-**API mode** (if you have Spotify credentials):
+Alternatively, set a public playlist in `.env` and run the same CLI command:
 
-```bash
-cp .env.example .env
-# Fill in CLIENT_ID, CLIENT_SECRET, PLAYLIST_URL
-python src/hitster_card_creator.py
+```dotenv
+PLAYLIST_URL=https://open.spotify.com/playlist/3cEYpjA9oz9GiPac4AsH4n
 ```
 
----
+The CLI intentionally uses public Spotify pages. Spotify's client-credentials flow cannot read playlist items, so client ID/secret values are not an API mode for the CLI.
 
-## ⚙️ Configuration
+## Spotify user authorization
 
-All options can be set via the **sidebar** in the web app, via **CLI flags**, or in the `.env` file.
+Each web-app user connects with their own Spotify developer application. The
+deployment does not need a hardcoded Client ID or Client Secret.
+
+1. Create or open an app in the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard).
+2. Open **Connect Spotify** in the Hitster sidebar.
+3. Copy the displayed **Redirect URI** into the Spotify app's redirect URI allowlist.
+4. Enter that app's **Client ID** and **Client Secret**, then select **Prepare Spotify Login**.
+5. Select **Authorize with Spotify**. Spotify opens as a top-level page and returns after approval.
+
+The Redirect URI must match exactly, including the scheme and trailing slash.
+For local HTTP callbacks, use an explicit loopback address such as
+`http://127.0.0.1:8501/`; do not use `localhost`.
+
+Credentials are kept in the user's Streamlit session for login and token
+refresh. The Client Secret is not written to the OAuth URL or signed callback
+state. If Spotify returns in a fresh Streamlit session, the callback page asks
+for the same Client Secret once so it can verify the signed state and complete
+the token exchange.
+
+## CLI configuration
 
 | Setting | CLI flag | `.env` variable | Default |
 |---|---|---|---|
-| Ink saving mode | `--ink-save-mode` | `INK_SAVING_MODE=true` | `false` |
+| Public playlist | — | `PLAYLIST_URL` | *(none)* |
+| Ink saving | `--ink-save-mode` | `INK_SAVING_MODE=true` | `false` |
 | Cutting borders | `--card-draw-border` | `CARD_DRAW_BORDER=true` | `false` |
 | Card label | `--card-label "text"` | `CARD_LABEL=text` | *(none)* |
-| Starting card number | `--start-number 1` | `CARD_START_NUMBER=1` | `1` |
-| QR Background Mode | `--qr-bg-mode` | `QR_BG_MODE=solid` | `solid` |
-| QR Module Color | `--qr-module-color` | `QR_MODULE_COLOR=#FFFFFF` | `#FFFFFF` |
-| Background Type | `--bg-type` | `BG_TYPE=neon_rings` | `neon_rings` |
-| Game Title | `--game-title` | `GAME_TITLE=MyGame` | *(none)* |
+| Starting number | `--start-number 1` | `CARD_START_NUMBER=1` | `1` |
+| QR background | `--qr-bg-mode` | `QR_BG_MODE=solid` | `solid` |
+| QR module color | `--qr-module-color` | `QR_MODULE_COLOR=#FFFFFF` | `#FFFFFF` |
+| Background type | `--bg-type` | `BG_TYPE=neon_rings` | `neon_rings` |
+| Game title | `--game-title` | `GAME_TITLE=MyGame` | *(none)* |
 
-### Colour gradient
+The CLI caches editable metadata in `output/hitster_cards/songs.json`. Use `--fetch` to refresh it. Generated card images from older runs are cleared before rebuilding so stale cards cannot enter the PDF.
 
-Edit the `COLOR_GRADIENT` list in the config section of `src/hitster_card_creator.py`:
-
-```python
-COLOR_GRADIENT = [
-    "#7030A0",  # Purple (oldest)
-    "#E31C79",  # Pink
-    "#FF6B9D",  # Light pink
-    "#FFA500",  # Orange
-    "#FFD700",  # Gold
-    "#87CEEB",  # Sky blue
-    "#4169E1",  # Royal blue (newest)
-]
-```
-
----
-
-## 🔑 Spotify User Authorization (playlists over ~100 tracks)
-
-Spotify requires user authorization to read complete playlist contents. The playlist
-must be owned by, or collaboratively shared with, the connected Spotify account.
-
-1. Go to the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard) and create an app.
-2. Copy the **Redirect URI** shown under **Connect Spotify** in the web app sidebar into the app's Redirect URI allowlist exactly.
-3. Enter the app's **Client ID** and **Client Secret** in the sidebar.
-4. Select **Prepare Spotify Login**, then **Authorize with Spotify** and approve access.
-5. Paste the playlist URL and fetch its complete contents. Years come from Spotify's album `release_date` and can still be edited before PDF generation.
-
-For local use, Spotify requires an explicit loopback address such as
-`http://127.0.0.1:8501`; `localhost` is not accepted.
-
----
-
-## 🔧 Fixing Incorrect Years
-
-Spotify metadata sometimes shows remaster/re-release years instead of the original.
-
-**Web app:** Edit the **Year** column directly in the review table.
-
-**CLI:**
-
-1. Run the script once — it saves `output/hitster_cards/songs.json`.
-2. Fix years in the JSON manually, or paste it into ChatGPT / Gemini:
-   > *"Correct the years in this JSON to the original single release dates. Return valid JSON."*
-3. Run again (without `--fetch`) to use the corrected file.
-
----
-
-## 📂 Output
+## Output and printing
 
 | File | Description |
 |---|---|
-| `output/hitster_cards/card_NNN_qr.png` | QR-side card images |
-| `output/hitster_cards/card_NNN_solution.png` | Solution-side card images |
-| `output/hitster_cards/songs.json` | Song metadata (editable) |
-| `output/hitster_cards.pdf` | Print-ready PDF |
+| `output/hitster_cards/card_NNN_qr.png` | QR side |
+| `output/hitster_cards/card_NNN_solution.png` | Solution side |
+| `output/hitster_cards/songs.json` | Editable song metadata |
+| `output/hitster_cards.pdf` | Duplex-ready A4 PDF |
 
----
+Print at **Actual size**, double-sided, flipping on the long edge.
 
-## 🖨️ Printing Instructions
-
-1. Print the PDF **double-sided** (flip on long edge).
-2. Cut along the evenly distributed gaps between the cards.
-3. Each card is **6.5 × 6.5 cm**, with 12 cards per A4 sheet (3 across × 4 down).
-
-> **Tip:** Use "Actual size" in your printer settings (not "Fit to page") so QR codes scan correctly.
-
----
-
-## 🐛 Troubleshooting
+## Troubleshooting
 
 | Problem | Fix |
 |---|---|
-| `ModuleNotFoundError` | `pip install -r requirements.txt` |
-| Playlist not found (404) | Make sure the playlist is **public** |
-| QR codes won't scan | Print at "Actual size", high quality |
-| Download button unresponsive on mobile | Try a desktop browser |
+| Spotify reports a redirect mismatch | Copy the displayed URI exactly, including the scheme and trailing slash. |
+| Spotify shows a frame/X-Frame-Options error | Open the app directly and use its **Authorize with Spotify** link; Spotify must open as a top-level page/new tab. |
+| Playlist fetch returns 401 | Reopen **Connect Spotify**, re-enter your credentials, and authorize again. |
+| Public playlist yields no tracks | Make it public, connect Spotify, or paste individual track links. |
+| QR codes do not scan | Use the solid QR background, print at Actual size, and avoid low-quality print settings. |
+| Mobile download is unresponsive | Generate/download from a desktop browser. |
 
----
+## Development
 
-## 🤝 Contributing
+Runtime dependencies are exactly pinned in `requirements.txt`. Optional development tooling is in `requirements-dev.txt`.
 
-Pull requests welcome! Ideas:
+```bash
+pip install -r requirements-dev.txt
+python -m unittest discover -s tests -v
+flake8 src streamlit_app.py tests
+```
 
-- New card designs / themes
-- Support for other music platforms (Apple Music, YouTube Music)
-- Improved year accuracy heuristics
+## Contributing and license
 
----
-
-## 🤝 Contributors
-
-A huge thanks to the following people for helping make this project better:
-
-- **[cdaller](https://github.com/cdaller)** — Ink-saving mode, improved QR code logic, enhanced year accuracy.
-- **[thommy86](https://github.com/thommy86)** — General Streamlit UI Overhaul, added game titles, custom backgrounds.
----
-
-## 📜 License
+Issues and pull requests are welcome at [PlebasaurusRekt/hitster-card-generator](https://github.com/PlebasaurusRekt/hitster-card-generator).
 
 MIT License — see [LICENSE](LICENSE).
 
-## Credits
-
-- Inspired by the original [Hitster game](https://www.jumbodiset.com/hitster)
-- [Montserrat](https://github.com/JulietaUla/Montserrat) font by Julieta Ulanovsky
+Inspired by the original Hitster game. Montserrat is by Julieta Ulanovsky.

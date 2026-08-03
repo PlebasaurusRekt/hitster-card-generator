@@ -1,15 +1,23 @@
-import io
+import base64
+import binascii
 import gc
+import hashlib
+import hmac
+import io
+import json
 import colorsys
 import math
 import time
 import os
 import random
 import secrets
-import threading
 import textwrap
 import re
 import zlib
+import threading
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import lru_cache
 import qrcode
 import requests
 import numpy as np
@@ -21,8 +29,13 @@ from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from reportlab.lib.utils import ImageReader
 from reportlab.lib.units import cm
-db = None
-_font_cache = None
+
+from src.http_client import (
+    get_bounded_https_content, get_http_session, get_spotify_html,
+)
+from src.input_validation import (
+    MAX_TRACK_LINKS, InputValidationError, canonicalize_spotify_url,
+)
 
 CARD_PHYSICAL_SIZE_CM = 6.5
 DEFAULT_QR_CODE_SIZE_CM = 2.5
@@ -131,7 +144,7 @@ DEFAULT_DESIGN_SETTINGS = {
     "qr_background_mode": "solid", # "transparent" or "solid"
     "qr_background_color": (0, 0, 0), # solid backplate color
     "qr_module_color": (255, 255, 255),
-    "qr_quiet_zone": 2, 
+    "qr_quiet_zone": 4,
     "qr_backplate_padding": 0,
     "qr_backplate_padding_cm": DEFAULT_QR_BORDER_CM,
     "qr_backplate_radius": 20,
@@ -177,11 +190,17 @@ def get_settings(override=None):
     """Get settings merged with defaults."""
     settings = DEFAULT_DESIGN_SETTINGS.copy()
     provided_settings = {}
-    if db:
-        provided_settings.update(db)
     if override:
         provided_settings.update(override)
     settings.update(provided_settings)
+    card_label = str(settings.get('card_label') or '').strip()
+    if card_label:
+        if not settings.get('qr_title'):
+            settings['qr_title'] = card_label
+            settings['qr_title_enabled'] = True
+        if not settings.get('sol_title'):
+            settings['sol_title'] = card_label
+            settings['sol_title_enabled'] = True
     if (
         'qr_backplate_padding' in provided_settings
         and 'qr_backplate_padding_cm' not in provided_settings
@@ -196,9 +215,53 @@ def get_settings(override=None):
         if isinstance(settings.get(key), str):
             try:
                 settings[key] = tuple(int(c * 255) for c in to_rgba(settings[key]))
-            except:
+            except (TypeError, ValueError):
                 pass
     return settings
+
+def stable_seed(value):
+    """Return a reproducible unsigned 64-bit seed for arbitrary text."""
+    digest = hashlib.sha256(str(value).encode('utf-8')).digest()
+    return int.from_bytes(digest[:8], 'big')
+
+
+def build_generation_fingerprint(records, settings):
+    """Return a stable digest for every input that affects a generated PDF."""
+    def normalize(value):
+        if isinstance(value, Image.Image):
+            return {
+                'image_mode': value.mode,
+                'image_size': value.size,
+                'image_sha256': hashlib.sha256(value.tobytes()).hexdigest(),
+            }
+        if isinstance(value, dict):
+            return {
+                str(key): normalize(item)
+                for key, item in sorted(
+                    value.items(), key=lambda pair: str(pair[0])
+                )
+            }
+        if isinstance(value, (list, tuple)):
+            return [normalize(item) for item in value]
+        if isinstance(value, np.generic):
+            return normalize(value.item())
+        if isinstance(value, float) and math.isnan(value):
+            return None
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        return repr(value)
+
+    payload = json.dumps(
+        {
+            'records': normalize(records),
+            'settings': normalize(settings),
+        },
+        ensure_ascii=False,
+        separators=(',', ':'),
+        sort_keys=True,
+    ).encode('utf-8')
+    return hashlib.sha256(payload).hexdigest()
+
 
 # =============================================================================
 # YEAR VALIDATION
@@ -217,77 +280,121 @@ def _validate_year(year: int | None) -> int | None:
 # =============================================================================
 # Year fetching functions using MusicBrainz and iTunes APIs
 # =============================================================================
+_musicbrainz_lock = threading.Lock()
+_musicbrainz_last_request_at = 0.0
+
+
+@lru_cache(maxsize=2048)
 def get_year_from_musicbrainz(title, artist) -> int | None:
-    q = f'recording:"{title}" AND artist:"{artist}"'
-    params = {"query": q, "fmt": "json", "limit": 5}
-    headers = {"User-Agent": "hitster-card-generator/2.0 (https://github.com/WhiteShunpo/hitster-cards-generator)"}
+    """Query MusicBrainz with its required global request spacing."""
+    query = f'recording:"{title}" AND artist:"{artist}"'
+    params = {"query": query, "fmt": "json", "limit": 5}
+    headers = {
+        "User-Agent": (
+            "hitster-card-generator/2.0 "
+            "(https://github.com/PlebasaurusRekt/hitster-card-generator)"
+        )
+    }
+    global _musicbrainz_last_request_at
     try:
-        r = requests.get("https://musicbrainz.org/ws/2/recording", params=params, headers=headers, timeout=10)
-        if r.status_code in (429, 503):
-            time.sleep(2)
-            r = requests.get("https://musicbrainz.org/ws/2/recording", params=params, headers=headers, timeout=10)
-        r.raise_for_status()
-        result_json = r.json()
+        with _musicbrainz_lock:
+            elapsed = time.monotonic() - _musicbrainz_last_request_at
+            wait_seconds = max(0.0, 1.1 - elapsed)
+            if wait_seconds:
+                time.sleep(wait_seconds)
+            response = get_http_session().get(
+                "https://musicbrainz.org/ws/2/recording",
+                params=params,
+                headers=headers,
+                timeout=10,
+            )
+            _musicbrainz_last_request_at = time.monotonic()
+            if response.status_code in (429, 503):
+                retry_after = response.headers.get('Retry-After', '2')
+                try:
+                    retry_seconds = min(5.0, max(1.0, float(retry_after)))
+                except ValueError:
+                    retry_seconds = 2.0
+                time.sleep(retry_seconds)
+                response = get_http_session().get(
+                    "https://musicbrainz.org/ws/2/recording",
+                    params=params,
+                    headers=headers,
+                    timeout=10,
+                )
+                _musicbrainz_last_request_at = time.monotonic()
+        response.raise_for_status()
+        result_json = response.json()
         years = []
-        if not result_json or "recordings" not in result_json:
+        if not isinstance(result_json, dict):
             return None
-        for rec in result_json.get("recordings", []):
-            for rel in rec.get("releases", []) or []:
-                date = rel.get("date")
+        for recording in result_json.get("recordings", []):
+            for release in recording.get("releases", []) or []:
+                date = release.get("date")
                 if date:
-                    y = _validate_year(int(date.split("-")[0]))
-                    if y is not None:
-                        years.append(y)
-        if not years:
-            return None
-        return min(years)
-    except Exception:
+                    year = _validate_year(int(str(date).split("-")[0]))
+                    if year is not None:
+                        years.append(year)
+        return min(years) if years else None
+    except (
+        AttributeError,
+        TypeError,
+        ValueError,
+        requests.RequestException,
+        requests.JSONDecodeError,
+    ):
         return None
 
+
+@lru_cache(maxsize=2048)
 def get_year_from_itunes(title, artist) -> int | None:
-    q = urllib.parse.quote(f"{artist} {title}")
-    url = f"https://itunes.apple.com/search?term={q}&entity=song&limit=5"
+    """Return the earliest plausible iTunes release year."""
+    query = urllib.parse.quote(f"{artist} {title}")
+    url = f"https://itunes.apple.com/search?term={query}&entity=song&limit=5"
     try:
-        r = requests.get(url, timeout=8)
-        r.raise_for_status()
-        result_json = r.json()
-        if not result_json or "results" not in result_json:
+        response = get_http_session().get(url, timeout=8)
+        response.raise_for_status()
+        result_json = response.json()
+        if not isinstance(result_json, dict):
             return None
         years = []
-        for res in result_json.get("results", []):
-            rd = res.get("releaseDate")
-            if rd:
-                y = _validate_year(int(rd.split("-")[0]))
-                if y is not None:
-                    years.append(y)
-        if not years:
-            return None
-        return min(years)
-    except Exception:
+        for result in result_json.get("results", []):
+            release_date = result.get("releaseDate")
+            if release_date:
+                year = _validate_year(
+                    int(str(release_date).split("-")[0])
+                )
+                if year is not None:
+                    years.append(year)
+        return min(years) if years else None
+    except (
+        AttributeError,
+        TypeError,
+        ValueError,
+        requests.RequestException,
+        requests.JSONDecodeError,
+    ):
         return None
-    
-def get_year_and_source(title, artist, orig_year) -> tuple[int | None, str | None]:
-    """Get release year and source ('iTunes' or 'MusicBrainz') for a song.
-    
-    Args:
-        title: Song title (first!)
-        artist: Artist name (second!)
-        orig_year: Fallback year from Spotify
-    """
+
+
+@lru_cache(maxsize=2048)
+def get_year_and_source(
+    title, artist, orig_year
+) -> tuple[int | None, str | None]:
+    """Resolve a release year using cached iTunes/MusicBrainz fallbacks."""
     itunes_year = get_year_from_itunes(title, artist)
     if itunes_year is not None:
         return itunes_year, 'iTunes'
-    
-    # Rate-limit: MusicBrainz enforces ~1 req/sec
-    time.sleep(1.1)
+
     musicbrainz_year = get_year_from_musicbrainz(title, artist)
     if musicbrainz_year is not None:
         return musicbrainz_year, 'MusicBrainz'
-    
+
     validated = _validate_year(orig_year)
     if validated is not None:
         return validated, 'Spotify'
     return None, None
+
 
 # =============================================================================
 # NAME SANITIZATION
@@ -337,8 +444,23 @@ def fetch_no_api_data(links_file):
         return None
         
     print(f"Found {links_file}. Switching to No-API Scraper Mode...")
-    with open(links_file, 'r') as f:
-        urls = [line.strip() for line in f.readlines() if 'spotify.com/track/' in line]
+    with open(links_file, 'r', encoding='utf-8') as file_handle:
+        raw_urls = [
+            line.strip()
+            for line in file_handle
+            if line.strip()
+        ]
+    if len(raw_urls) > MAX_TRACK_LINKS:
+        raise SpotifyAPIError(
+            f"A maximum of {MAX_TRACK_LINKS} tracks can be processed at once."
+        )
+    try:
+        urls = [
+            canonicalize_spotify_url(url, expected_kind='track')
+            for url in raw_urls
+        ]
+    except InputValidationError as exc:
+        raise SpotifyAPIError(str(exc)) from exc
 
     return fetch_no_api_data_from_list(urls)
 
@@ -350,51 +472,176 @@ class SpotifyAPIError(RuntimeError):
     """Raised when Spotify authentication or playlist access fails."""
 
 
+class SpotifyAuthenticationError(SpotifyAPIError):
+    """Raised when Spotify user authorization must be renewed."""
+
+
 SPOTIFY_OAUTH_SCOPES = (
     'playlist-read-private',
     'playlist-read-collaborative',
 )
-SPOTIFY_OAUTH_PENDING_TTL_SECONDS = 10 * 60
-_spotify_oauth_pending = {}
-_spotify_oauth_lock = threading.Lock()
+SPOTIFY_OAUTH_STATE_TTL_SECONDS = 10 * 60
 
 
-def _purge_expired_spotify_oauth_requests():
-    """Remove expired OAuth attempts. Caller must hold the OAuth lock."""
-    cutoff = time.time() - SPOTIFY_OAUTH_PENDING_TTL_SECONDS
-    for state, details in list(_spotify_oauth_pending.items()):
-        if details['created_at'] < cutoff:
-            del _spotify_oauth_pending[state]
-
-
-def begin_spotify_oauth(client_id, client_secret, redirect_uri):
-    """Register an OAuth attempt and return Spotify's authorization URL."""
-    client_id = str(client_id).strip()
-    client_secret = str(client_secret).strip()
+def _validate_spotify_redirect_uri(redirect_uri):
+    """Validate an exact OAuth callback URI and return it unchanged."""
     redirect_uri = str(redirect_uri).strip()
-    if not client_id or not client_secret:
-        raise SpotifyAPIError("Enter both Spotify credentials first.")
+    if not redirect_uri or len(redirect_uri) > 2048:
+        raise SpotifyAPIError("Enter a valid Spotify redirect URI.")
+    try:
+        parsed = urllib.parse.urlsplit(redirect_uri)
+        parsed.port
+    except ValueError as exc:
+        raise SpotifyAPIError("Enter a valid Spotify redirect URI.") from exc
 
-    parsed_redirect = urllib.parse.urlparse(redirect_uri)
-    is_loopback = parsed_redirect.hostname in ('127.0.0.1', '::1')
-    if not (
-        parsed_redirect.scheme == 'https'
-        or (parsed_redirect.scheme == 'http' and is_loopback)
+    is_loopback = parsed.hostname in ('127.0.0.1', '::1')
+    is_allowed = (
+        parsed.scheme == 'https'
+        or (parsed.scheme == 'http' and is_loopback)
+    )
+    if (
+        not is_allowed
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.fragment
     ):
         raise SpotifyAPIError(
             "The redirect URI must use HTTPS, or HTTP with 127.0.0.1/::1."
         )
+    return redirect_uri
 
-    state = secrets.token_urlsafe(32)
-    with _spotify_oauth_lock:
-        _purge_expired_spotify_oauth_requests()
-        _spotify_oauth_pending[state] = {
+
+def _urlsafe_b64encode(value):
+    return base64.urlsafe_b64encode(value).rstrip(b'=').decode('ascii')
+
+
+def _urlsafe_b64decode(value):
+    padding = '=' * (-len(value) % 4)
+    try:
+        return base64.b64decode(
+            value + padding, altchars=b'-_', validate=True
+        )
+    except (ValueError, binascii.Error) as exc:
+        raise SpotifyAPIError(
+            "Spotify login security state was invalid. Start again."
+        ) from exc
+
+
+def _create_spotify_oauth_state(client_id, client_secret, redirect_uri):
+    payload = json.dumps(
+        {
             'client_id': client_id,
-            'client_secret': client_secret,
+            'created_at': int(time.time()),
+            'nonce': secrets.token_urlsafe(18),
             'redirect_uri': redirect_uri,
-            'created_at': time.time(),
-        }
+            'version': 1,
+        },
+        separators=(',', ':'),
+        sort_keys=True,
+    ).encode('utf-8')
+    payload_segment = _urlsafe_b64encode(payload)
+    signature = hmac.new(
+        client_secret.encode('utf-8'),
+        payload_segment.encode('ascii'),
+        hashlib.sha256,
+    ).digest()
+    return f"{payload_segment}.{_urlsafe_b64encode(signature)}"
 
+
+def _read_spotify_oauth_state(state, client_id, client_secret):
+    try:
+        payload_segment, signature_segment = str(state).split('.', 1)
+    except ValueError as exc:
+        raise SpotifyAPIError(
+            "Spotify login security state was invalid. Start again."
+        ) from exc
+
+    expected_signature = hmac.new(
+        client_secret.encode('utf-8'),
+        payload_segment.encode('ascii'),
+        hashlib.sha256,
+    ).digest()
+    supplied_signature = _urlsafe_b64decode(signature_segment)
+    if not hmac.compare_digest(expected_signature, supplied_signature):
+        raise SpotifyAPIError(
+            "Spotify login security state did not match. Start again."
+        )
+
+    try:
+        payload = json.loads(_urlsafe_b64decode(payload_segment))
+        created_at = int(payload['created_at'])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise SpotifyAPIError(
+            "Spotify login security state was invalid. Start again."
+        ) from exc
+
+    age = time.time() - created_at
+    if age < -60 or age > SPOTIFY_OAUTH_STATE_TTL_SECONDS:
+        raise SpotifyAPIError("Spotify login expired. Start again.")
+    if (
+        payload.get('version') != 1
+        or payload.get('client_id') != client_id
+        or not payload.get('nonce')
+    ):
+        raise SpotifyAPIError(
+            "Spotify login configuration changed. Start again."
+        )
+    return _validate_spotify_redirect_uri(payload.get('redirect_uri'))
+
+
+def inspect_spotify_oauth_state(state):
+    """Return unverified public callback hints from signed OAuth state.
+
+    This is only used to prefill the callback form when Spotify returns in a
+    fresh Streamlit session. Callers must still use ``complete_spotify_oauth``
+    with the user's secret before trusting any of these values.
+    """
+    state = str(state or '')
+    if not state or len(state) > 4096:
+        raise SpotifyAPIError(
+            "Spotify login security state was invalid. Start again."
+        )
+    try:
+        payload_segment, _ = state.split('.', 1)
+        payload = json.loads(_urlsafe_b64decode(payload_segment))
+        created_at = int(payload['created_at'])
+        client_id = str(payload['client_id']).strip()
+        nonce = str(payload['nonce']).strip()
+    except (
+        KeyError, TypeError, ValueError, json.JSONDecodeError
+    ) as exc:
+        raise SpotifyAPIError(
+            "Spotify login security state was invalid. Start again."
+        ) from exc
+
+    age = time.time() - created_at
+    if age < -60 or age > SPOTIFY_OAUTH_STATE_TTL_SECONDS:
+        raise SpotifyAPIError("Spotify login expired. Start again.")
+    if payload.get('version') != 1 or not client_id or not nonce:
+        raise SpotifyAPIError(
+            "Spotify login security state was invalid. Start again."
+        )
+    return {
+        'client_id': client_id,
+        'redirect_uri': _validate_spotify_redirect_uri(
+            payload.get('redirect_uri')
+        ),
+    }
+
+
+def begin_spotify_oauth(client_id, client_secret, redirect_uri):
+    """Return an authorization URL carrying signed, callback-safe state."""
+    client_id = str(client_id or '').strip()
+    client_secret = str(client_secret or '').strip()
+    if not client_id or not client_secret:
+        raise SpotifyAPIError(
+            "Enter your Spotify Client ID and Client Secret."
+        )
+    redirect_uri = _validate_spotify_redirect_uri(redirect_uri)
+    state = _create_spotify_oauth_state(
+        client_id, client_secret, redirect_uri
+    )
     query = urllib.parse.urlencode({
         'client_id': client_id,
         'response_type': 'code',
@@ -406,32 +653,35 @@ def begin_spotify_oauth(client_id, client_secret, redirect_uri):
 
 
 def discard_spotify_oauth(state):
-    """Discard a denied or abandoned OAuth request."""
-    if not state:
-        return
-    with _spotify_oauth_lock:
-        _spotify_oauth_pending.pop(str(state), None)
+    """Retained for callers; signed OAuth state has no server-side record."""
+    return None
 
 
-def complete_spotify_oauth(code, state):
-    """Exchange a Spotify callback code for user and refresh tokens."""
-    with _spotify_oauth_lock:
-        _purge_expired_spotify_oauth_requests()
-        pending = _spotify_oauth_pending.pop(str(state), None)
-    if pending is None:
+def complete_spotify_oauth(
+    code, state, client_id=None, client_secret=None
+):
+    """Verify callback state and exchange a Spotify code for user tokens."""
+    client_id = str(client_id or '').strip()
+    client_secret = str(client_secret or '').strip()
+    if not client_id or not client_secret:
         raise SpotifyAPIError(
-            "Spotify login expired or its security state did not match. Start again."
+            "Enter your Spotify Client ID and Client Secret."
         )
+    if not code or not state:
+        raise SpotifyAPIError("Spotify returned an incomplete login callback.")
 
+    redirect_uri = _read_spotify_oauth_state(
+        state, client_id, client_secret
+    )
     try:
-        response = requests.post(
+        response = get_http_session().post(
             'https://accounts.spotify.com/api/token',
             data={
                 'grant_type': 'authorization_code',
                 'code': code,
-                'redirect_uri': pending['redirect_uri'],
+                'redirect_uri': redirect_uri,
             },
-            auth=(pending['client_id'], pending['client_secret']),
+            auth=(client_id, client_secret),
             timeout=15,
         )
     except requests.RequestException as exc:
@@ -439,11 +689,16 @@ def complete_spotify_oauth(code, state):
             "Spotify's token service could not be reached."
         ) from exc
     if not response.ok:
-        raise SpotifyAPIError(
+        raise SpotifyAuthenticationError(
             f"Spotify login could not be completed (HTTP {response.status_code})."
         )
 
-    payload = response.json()
+    try:
+        payload = response.json()
+    except requests.JSONDecodeError as exc:
+        raise SpotifyAPIError(
+            "Spotify returned an invalid token response."
+        ) from exc
     access_token = payload.get('access_token')
     refresh_token = payload.get('refresh_token')
     if not access_token or not refresh_token:
@@ -455,29 +710,39 @@ def complete_spotify_oauth(code, state):
         'refresh_token': refresh_token,
         'expires_at': time.time() + int(payload.get('expires_in', 3600)),
         'scope': payload.get('scope', ''),
-        'client_id': pending['client_id'],
-        'client_secret': pending['client_secret'],
     }
 
 
-def get_spotify_access_token(auth):
+def get_spotify_access_token(
+    auth, client_id=None, client_secret=None
+):
     """Return a valid user token, refreshing it when nearly expired."""
     if not isinstance(auth, dict) or not auth.get('access_token'):
-        raise SpotifyAPIError("Connect your Spotify account first.")
+        raise SpotifyAuthenticationError(
+            "Connect your Spotify account first."
+        )
     if float(auth.get('expires_at', 0)) > time.time() + 60:
         return auth['access_token']
 
     refresh_token = auth.get('refresh_token')
+    client_id = str(client_id or '').strip()
+    client_secret = str(client_secret or '').strip()
     if not refresh_token:
-        raise SpotifyAPIError("Spotify login expired. Connect again.")
+        raise SpotifyAuthenticationError(
+            "Spotify login expired. Connect again."
+        )
+    if not client_id or not client_secret:
+        raise SpotifyAuthenticationError(
+            "Spotify credentials are missing. Connect again."
+        )
     try:
-        response = requests.post(
+        response = get_http_session().post(
             'https://accounts.spotify.com/api/token',
             data={
                 'grant_type': 'refresh_token',
                 'refresh_token': refresh_token,
             },
-            auth=(auth['client_id'], auth['client_secret']),
+            auth=(client_id, client_secret),
             timeout=15,
         )
     except requests.RequestException as exc:
@@ -485,12 +750,18 @@ def get_spotify_access_token(auth):
             "Spotify's token service could not be reached."
         ) from exc
     if not response.ok:
-        raise SpotifyAPIError(
+        raise SpotifyAuthenticationError(
             "Spotify login expired or was revoked. Connect again."
         )
 
-    payload = response.json()
-    auth['access_token'] = payload['access_token']
+    try:
+        payload = response.json()
+        access_token = payload['access_token']
+    except (KeyError, TypeError, requests.JSONDecodeError) as exc:
+        raise SpotifyAPIError(
+            "Spotify returned an invalid token response."
+        ) from exc
+    auth['access_token'] = access_token
     auth['expires_at'] = time.time() + int(payload.get('expires_in', 3600))
     if payload.get('refresh_token'):
         auth['refresh_token'] = payload['refresh_token']
@@ -500,13 +771,16 @@ def get_spotify_access_token(auth):
 def fetch_spotify_playlist_with_token(playlist_url, access_token):
     """Fetch every item in an owned/collaborative playlist with user OAuth."""
     try:
-        playlist_id = playlist_url.split('/playlist/')[1].split('?')[0]
-    except (IndexError, AttributeError) as exc:
-        raise SpotifyAPIError("Invalid Spotify playlist URL.") from exc
+        canonical_url = canonicalize_spotify_url(
+            playlist_url, expected_kind='playlist'
+        )
+    except InputValidationError as exc:
+        raise SpotifyAPIError(str(exc)) from exc
+    playlist_id = canonical_url.rsplit('/', 1)[-1]
 
     headers = {'Authorization': f'Bearer {access_token}'}
     try:
-        meta_response = requests.get(
+        meta_response = get_http_session().get(
             f'https://api.spotify.com/v1/playlists/{playlist_id}?fields=name',
             headers=headers, timeout=15,
         )
@@ -514,11 +788,20 @@ def fetch_spotify_playlist_with_token(playlist_url, access_token):
         raise SpotifyAPIError(
             "Spotify playlist metadata could not be reached."
         ) from exc
+    if meta_response.status_code == 401:
+        raise SpotifyAuthenticationError(
+            "Spotify login expired or was revoked. Connect again."
+        )
     if not meta_response.ok:
         raise SpotifyAPIError(
             f"Spotify could not open the playlist (HTTP {meta_response.status_code})."
         )
-    playlist_name = meta_response.json().get('name', 'Unknown')
+    try:
+        playlist_name = meta_response.json().get('name', 'Unknown')
+    except (AttributeError, requests.JSONDecodeError) as exc:
+        raise SpotifyAPIError(
+            "Spotify returned invalid playlist metadata."
+        ) from exc
     print(f"Playlist: {playlist_name}")
 
     items_url = f'https://api.spotify.com/v1/playlists/{playlist_id}/items'
@@ -527,12 +810,30 @@ def fetch_spotify_playlist_with_token(playlist_url, access_token):
     params = {'limit': 50}
     try:
         while items_url:
-            response = requests.get(
+            parsed_items_url = urllib.parse.urlsplit(items_url)
+            expected_path = f'/v1/playlists/{playlist_id}/items'
+            try:
+                valid_port = parsed_items_url.port in (None, 443)
+            except ValueError:
+                valid_port = False
+            if (
+                parsed_items_url.scheme != 'https'
+                or parsed_items_url.hostname != 'api.spotify.com'
+                or parsed_items_url.username is not None
+                or parsed_items_url.password is not None
+                or not valid_port
+                or parsed_items_url.path != expected_path
+            ):
+                raise SpotifyAPIError(
+                    "Spotify returned an invalid pagination URL."
+                )
+
+            response = get_http_session().get(
                 items_url, headers=headers, params=params, timeout=15,
             )
             params = None
             if response.status_code == 401:
-                raise SpotifyAPIError(
+                raise SpotifyAuthenticationError(
                     "Spotify login expired or was revoked. Connect again."
                 )
             if response.status_code == 403:
@@ -544,13 +845,43 @@ def fetch_spotify_playlist_with_token(playlist_url, access_token):
                 raise SpotifyAPIError(
                     f"Spotify playlist fetch failed (HTTP {response.status_code})."
                 )
-            page = response.json()
+            try:
+                page = response.json()
+                page_items = page.get('items', [])
+            except (AttributeError, requests.JSONDecodeError) as exc:
+                raise SpotifyAPIError(
+                    "Spotify returned an invalid playlist page."
+                ) from exc
+            if not isinstance(page_items, list):
+                raise SpotifyAPIError(
+                    "Spotify returned an invalid playlist item list."
+                )
             if total is None:
                 total = page.get('total')
-            all_items.extend(page.get('items', []))
+                try:
+                    if total is not None and int(total) > MAX_TRACK_LINKS:
+                        raise SpotifyAPIError(
+                            f"Playlists are limited to {MAX_TRACK_LINKS} tracks."
+                        )
+                except (TypeError, ValueError) as exc:
+                    raise SpotifyAPIError(
+                        "Spotify returned an invalid playlist size."
+                    ) from exc
+            all_items.extend(page_items)
+            if len(all_items) > MAX_TRACK_LINKS:
+                raise SpotifyAPIError(
+                    f"Playlists are limited to {MAX_TRACK_LINKS} tracks."
+                )
             items_url = page.get('next')
+            if items_url is not None and not isinstance(items_url, str):
+                raise SpotifyAPIError(
+                    "Spotify returned an invalid pagination response."
+                )
             if items_url:
-                print(f"Fetching more tracks... (currently have {len(all_items)})")
+                print(
+                    f"Fetching more tracks... "
+                    f"(currently have {len(all_items)})"
+                )
     except requests.RequestException as exc:
         raise SpotifyAPIError(
             "Spotify playlist items could not be reached."
@@ -566,58 +897,87 @@ def fetch_spotify_playlist_with_token(playlist_url, access_token):
     }
 
 
-def fetch_spotify_playlist(playlist_url, client_id, client_secret):
-    """Reject the obsolete app-only playlist flow with a clear error."""
-    raise SpotifyAPIError(
-        "Spotify no longer permits playlist-item access through Client "
-        "Credentials. Use the web app's Connect Spotify flow."
-    )
-
-
 def parse_playlist_data(playlist_data):
-    """
-    Extract song information from playlist data.
-    
-    Returns:
-        array of songs ('name', 'year', 'artist', 'link')
-    """
-    tracks = playlist_data['tracks']['items']
+    """Extract usable songs while skipping malformed playlist entries."""
+    try:
+        tracks = playlist_data['tracks']['items']
+    except (KeyError, TypeError) as exc:
+        raise SpotifyAPIError(
+            "Spotify returned an invalid playlist response."
+        ) from exc
+    if not isinstance(tracks, list):
+        raise SpotifyAPIError(
+            "Spotify returned an invalid playlist track list."
+        )
 
     songs = []
-
+    skipped = 0
     for item in tracks:
-        # Spotify renamed playlist entry `track` to `item` in February 2026.
-        # Accept both shapes so cached/older responses remain compatible.
+        if not isinstance(item, dict):
+            skipped += 1
+            continue
         track = item.get('item') or item.get('track')
-        if not isinstance(track, dict) or track.get('type') not in (None, 'track'):
+        if (
+            not isinstance(track, dict)
+            or track.get('type') not in (None, 'track')
+        ):
+            skipped += 1
             continue
 
-        name = track['name']
-        artist = track['artists'][0]['name']
-        release_date = track['album'].get('release_date', '')
+        artists = track.get('artists')
+        album = track.get('album')
+        external_urls = track.get('external_urls')
+        name = track.get('name')
+        if (
+            not name
+            or not isinstance(artists, list)
+            or not artists
+            or not isinstance(artists[0], dict)
+            or not artists[0].get('name')
+            or not isinstance(album, dict)
+            or not isinstance(external_urls, dict)
+        ):
+            skipped += 1
+            continue
         try:
-            spotify_year = _validate_year(int(release_date.split("-")[0]))
+            link = canonicalize_spotify_url(
+                external_urls.get('spotify'), expected_kind='track'
+            )
+        except InputValidationError:
+            skipped += 1
+            continue
+
+        release_date = album.get('release_date', '')
+        try:
+            spotify_year = _validate_year(
+                int(str(release_date).split('-')[0])
+            )
         except (TypeError, ValueError):
             spotify_year = None
-        year = spotify_year
-        year_source = 'Spotify' if spotify_year is not None else None
 
-        song = {}
-        song['name'] = sanitize_name(name)
-        song['original_name'] = name
-        song['original_year'] = spotify_year
-        song['year'] = year
-        song['year_source'] = year_source
-        song['artist'] = artist
-        song['link'] = track['external_urls']['spotify']
-        song['album'] = track['album']['name']
-        songs.append(song)
+        songs.append({
+            'name': sanitize_name(name),
+            'original_name': name,
+            'original_year': spotify_year,
+            'year': spotify_year,
+            'year_source': (
+                'Spotify' if spotify_year is not None else None
+            ),
+            'artist': artists[0]['name'],
+            'link': link,
+            'album': str(album.get('name') or ''),
+        })
 
-    no_year = [s for s in songs if s['year'] is None]
+    if skipped:
+        print(f"⚠ Skipped {skipped} malformed or unavailable track item(s).")
+    no_year = [song for song in songs if song['year'] is None]
     if no_year:
-        print(f"\n⚠ {len(no_year)} song(s) have no year — edit songs.json manually before re-running:")
-        for s in no_year:
-            print(f"  - {s['artist']} — {s['original_name']}")
+        print(
+            f"\n⚠ {len(no_year)} song(s) have no year — "
+            "edit songs.json manually before re-running:"
+        )
+        for song in no_year:
+            print(f"  - {song['artist']} — {song['original_name']}")
 
     return songs
 
@@ -627,60 +987,80 @@ def parse_playlist_data(playlist_data):
 # =============================================================================
 
 def scrape_playlist_track_links(playlist_url) -> list[str]:
-    """
-    Scrape individual track URLs from a public Spotify playlist page.
-    Returns a list of 'https://open.spotify.com/track/...' URLs.
-    """
-    headers = {'User-Agent': 'Mozilla/5.0'}
+    """Extract bounded, validated track URLs from a public playlist page."""
     try:
-        res = requests.get(playlist_url, headers=headers, timeout=10)
-        res.raise_for_status()
-        soup = BeautifulSoup(res.text, 'html.parser')
+        html_text, canonical_url = get_spotify_html(
+            playlist_url, expected_kind='playlist'
+        )
+    except (InputValidationError, requests.RequestException) as exc:
+        raise SpotifyAPIError(
+            "The public Spotify playlist page could not be loaded."
+        ) from exc
 
-        track_links = []
-        # Spotify embeds track links in <meta> and <a> tags on the public page
-        for tag in soup.find_all("meta"):
-            content = tag.get("content", "")
-            if "open.spotify.com/track/" in content:
-                # Extract just the track URL (strip query params)
-                url = content.split("?")[0]
-                if url not in track_links:
-                    track_links.append(url)
+    soup = BeautifulSoup(html_text, 'html.parser')
+    candidates = []
+    for tag in soup.find_all('meta'):
+        content = tag.get('content', '')
+        candidates.extend(
+            re.findall(
+                r'https://open[.]spotify[.]com/(?:intl-[^/]+/)?'
+                r'track/[A-Za-z0-9]{22}',
+                content,
+            )
+        )
+    for tag in soup.find_all('a', href=True):
+        candidates.append(urllib.parse.urljoin(canonical_url, tag['href']))
 
-        # Also look in <a> href attributes
-        for tag in soup.find_all("a", href=True):
-            href = tag["href"]
-            if "/track/" in href:
-                if href.startswith("/"):
-                    href = "https://open.spotify.com" + href
-                url = href.split("?")[0]
-                if url not in track_links:
-                    track_links.append(url)
+    track_links = []
+    for candidate in candidates:
+        try:
+            track_url = canonicalize_spotify_url(
+                candidate, expected_kind='track'
+            )
+        except InputValidationError:
+            continue
+        if track_url not in track_links:
+            track_links.append(track_url)
+        if len(track_links) >= MAX_TRACK_LINKS:
+            break
 
-        return track_links
-    except Exception as e:
-        print(f"Error scraping playlist: {e}")
-        return []
+    if not track_links:
+        raise SpotifyAPIError(
+            "Spotify returned no public tracks for this playlist. "
+            "Connect Spotify to access private or restricted playlists."
+        )
+    return track_links
 
 
 # =============================================================================
 # CARD GENERATION FUNCTIONS
 # =============================================================================
 
-def create_qr_code(song_link):
-    """Generate inverted QR code (white on black)."""
-    qr = qrcode.QRCode(version=1, box_size=10, border=0)
+def create_qr_code(song_link, quiet_zone=4):
+    """Generate an inverted QR code with a standards-compliant quiet zone."""
+    quiet_zone = max(4, int(quiet_zone))
+    qr = qrcode.QRCode(version=1, box_size=10, border=quiet_zone)
     qr.add_data(song_link)
     qr.make(fit=True)
-    img = qr.make_image(fill='black', back_color='white')
-    return ImageOps.invert(img)
+    generated = qr.make_image(
+        fill_color='black', back_color='white'
+    ).convert('L')
+    inverted = ImageOps.invert(generated)
+    inverted.info['qr_module_count'] = qr.modules_count + 2 * quiet_zone
+    inverted.info['qr_quiet_zone'] = quiet_zone
+    return inverted
 
 
-def create_qr_with_neon_rings(qr_code, output_path, card_number=None):
+def create_qr_with_neon_rings(
+    qr_code, output_path, card_number=None, settings_override=None
+):
     """
     Create QR code card with colorful neon rings background.
     """
-    img = create_qr_with_neon_rings_in_memory(qr_code, card_number=card_number)
+    img = create_qr_with_neon_rings_in_memory(
+        qr_code, card_number=card_number,
+        settings_override=settings_override,
+    )
     img.save(output_path)
     return output_path
 
@@ -725,8 +1105,34 @@ def get_year_color(year, all_years, settings=None):
     return (r, g, b)
 
 
-_google_font_cache = {}
-_google_font_variants_cache = {}
+FONT_CACHE_MAX_ENTRIES = 96
+FONT_VARIANT_CACHE_MAX_ENTRIES = 32
+FONT_API_MAX_BYTES = 1024 * 1024
+FONT_FILE_MAX_BYTES = 5 * 1024 * 1024
+FONT_PROVIDER_HOSTS = {
+    'gwfh.mranftl.com', 'fonts.gstatic.com',
+}
+_google_font_cache = OrderedDict()
+_google_font_variants_cache = OrderedDict()
+_font_cache_lock = threading.RLock()
+
+
+def _bounded_cache_get(cache, key):
+    with _font_cache_lock:
+        try:
+            value = cache.pop(key)
+        except KeyError:
+            return None
+        cache[key] = value
+        return value
+
+
+def _bounded_cache_put(cache, key, value, max_entries):
+    with _font_cache_lock:
+        cache.pop(key, None)
+        cache[key] = value
+        while len(cache) > max_entries:
+            cache.popitem(last=False)
 
 
 def normalize_font_weight(weight, default=400):
@@ -781,32 +1187,67 @@ def get_google_font(family_name, size, fallback_font, italic=False, weight=700):
     font_bytes_key = (font_id, weight, italic)
     cache_key = (font_id, weight, italic, size)
 
-    if cache_key in _google_font_cache:
-        return _google_font_cache[cache_key]
+    cached_font = _bounded_cache_get(_google_font_cache, cache_key)
+    if cached_font is not None:
+        return cached_font
 
-    font_bytes = _google_font_cache.get(font_bytes_key)
+    font_bytes = _bounded_cache_get(
+        _google_font_cache, font_bytes_key
+    )
     if not font_bytes:
         try:
-            variants = _google_font_variants_cache.get(font_id)
+            variants = _bounded_cache_get(
+                _google_font_variants_cache, font_id
+            )
             if variants is None:
-                api_url = f"https://gwfh.mranftl.com/api/fonts/{font_id}"
-                response = requests.get(api_url, timeout=5)
-                variants = response.json().get('variants', []) if response.status_code == 200 else []
-                _google_font_variants_cache[font_id] = variants
+                quoted_font_id = urllib.parse.quote(font_id, safe='-')
+                api_url = (
+                    "https://gwfh.mranftl.com/api/fonts/"
+                    f"{quoted_font_id}"
+                )
+                api_bytes, _, _ = get_bounded_https_content(
+                    api_url,
+                    allowed_hosts=FONT_PROVIDER_HOSTS,
+                    max_bytes=FONT_API_MAX_BYTES,
+                    timeout=5,
+                )
+                api_payload = json.loads(api_bytes)
+                variants = api_payload.get('variants', [])
+                if not isinstance(variants, list):
+                    variants = []
+                _bounded_cache_put(
+                    _google_font_variants_cache, font_id, variants,
+                    FONT_VARIANT_CACHE_MAX_ENTRIES,
+                )
 
             variant = _select_google_font_variant(variants, weight, italic)
             if variant:
-                response = requests.get(variant['ttf'], timeout=5)
-                if response.status_code == 200:
-                    font_bytes = response.content
-                    _google_font_cache[font_bytes_key] = font_bytes
-        except Exception as e:
-            print(f"Error downloading font: {e}")
+                font_bytes, _, _ = get_bounded_https_content(
+                    variant['ttf'],
+                    allowed_hosts=FONT_PROVIDER_HOSTS,
+                    max_bytes=FONT_FILE_MAX_BYTES,
+                    timeout=5,
+                )
+                _bounded_cache_put(
+                    _google_font_cache, font_bytes_key, font_bytes,
+                    FONT_CACHE_MAX_ENTRIES,
+                )
+        except (
+            KeyError,
+            TypeError,
+            ValueError,
+            json.JSONDecodeError,
+            requests.RequestException,
+        ) as exc:
+            print(f"Error downloading font: {type(exc).__name__}")
 
     if font_bytes:
         try:
             font = ImageFont.truetype(io.BytesIO(font_bytes), size)
-            _google_font_cache[cache_key] = font
+            _bounded_cache_put(
+                _google_font_cache, cache_key, font,
+                FONT_CACHE_MAX_ENTRIES,
+            )
             return font
         except (OSError, TypeError):
             pass
@@ -828,13 +1269,15 @@ def get_font_for_setting(settings, size, role="artist", italic=False, weight=700
 
 
 def create_solution_side(
-    song_name, artist, year, all_years, output_path, card_number=None
+    song_name, artist, year, all_years, output_path, card_number=None,
+    settings_override=None,
 ):
     """
     Create solution card with year-based color background.
     """
     img = create_solution_side_in_memory(
-        song_name, artist, year, all_years, card_number=card_number
+        song_name, artist, year, all_years, card_number=card_number,
+        settings_override=settings_override,
     )
     img.save(output_path)
     return output_path
@@ -879,6 +1322,30 @@ def get_pdf_grid_layout(page_width, page_height):
     return PDF_CARD_SIZE, margin_x, margin_y, gap_x, gap_y
 
 
+def get_pdf_card_positions(card_count, mirrored=False):
+    """Return shared front/back positions for one PDF card batch."""
+    if not 0 <= card_count <= PDF_CARDS_PER_PAGE:
+        raise ValueError(
+            f"PDF batches must contain 0-{PDF_CARDS_PER_PAGE} cards."
+        )
+    card_size, margin_x, margin_y, gap_x, gap_y = (
+        get_pdf_grid_layout(*A4)
+    )
+    positions = []
+    for index in range(card_count):
+        row = index // PDF_GRID_COLS
+        column = index % PDF_GRID_COLS
+        if mirrored:
+            column = PDF_GRID_COLS - 1 - column
+        x = margin_x + column * (card_size + gap_x)
+        y = (
+            A4[1] - margin_y - (row + 1) * card_size
+            - row * gap_y
+        )
+        positions.append((index, x, y))
+    return positions
+
+
 def get_pdf_render_settings(settings):
     """Scale pixel-based design values to the configured PDF output DPI."""
     render_settings = dict(settings)
@@ -913,73 +1380,80 @@ def draw_pdf_card_image(c, image_source, x, y, card_size):
 
 
 def create_cards_pdf(cards_folder, output_pdf_path):
-    """
-    Create print-ready PDF with alternating front/back pages.
-    3x4 grid (12 cards per page), 6.5cm x 6.5cm cards, ready for duplex printing.
-    """
-    c = canvas.Canvas(output_pdf_path, pagesize=A4)
-    width, height = A4
-    
-    # Card configuration
-    card_size, margin_x, margin_y, gap_x, gap_y = get_pdf_grid_layout(
-        width, height
+    """Create a duplex PDF from matched disk-rendered card pairs."""
+    file_pattern = re.compile(
+        r'^card_([0-9]+)_(qr|solution)[.]png$'
     )
-    cards_per_row = PDF_GRID_COLS
-    cards_per_page = PDF_CARDS_PER_PAGE
-    
-    # Get sorted card files
-    qr_images = sorted([f for f in os.listdir(cards_folder) if f.endswith('_qr.png')],
-                      key=lambda x: int(re.search(r'(\d+)', x).group()))
-    solution_images = sorted([f for f in os.listdir(cards_folder) if f.endswith('_solution.png')],
-                            key=lambda x: int(re.search(r'(\d+)', x).group()))
-    
-    total_pages = (len(qr_images) + cards_per_page - 1) // cards_per_page
-    
-    # Create alternating front/back pages
-    for page_idx in range(total_pages):
-        start_card = page_idx * cards_per_page
-        end_card = min(start_card + cards_per_page, len(qr_images))
-        
-        # FRONT PAGE (QR codes) — keep sheet margins/gutters ink-free.
-        c.setFillColorRGB(1, 1, 1)
-        c.rect(0, 0, width, height, stroke=0, fill=1)
-        
-        for card_idx in range(start_card, end_card):
-            idx = card_idx - start_card
-            row = idx // cards_per_row
-            col = idx % cards_per_row
-            
-            x = margin_x + col * (card_size + gap_x)
-            y = height - margin_y - (row + 1) * card_size - row * gap_y
-            
-            qr_path = os.path.join(cards_folder, qr_images[card_idx])
-            draw_pdf_card_image(c, qr_path, x, y, card_size)
-        
-        c.showPage()
-        
-        # BACK PAGE (Solutions) - white background, mirrored
-        c.setFillColorRGB(1, 1, 1)
-        c.rect(0, 0, width, height, stroke=0, fill=1)
-        
-        for card_idx in range(start_card, end_card):
-            idx = card_idx - start_card
-            row = idx // cards_per_row
-            col = idx % cards_per_row
-            col_mirrored = cards_per_row - 1 - col  # Mirror for duplex
-            
-            x = margin_x + col_mirrored * (card_size + gap_x)
-            y = height - margin_y - (row + 1) * card_size - row * gap_y
-            
-            sol_path = os.path.join(cards_folder, solution_images[card_idx])
-            draw_pdf_card_image(c, sol_path, x, y, card_size)
-        
-        c.showPage()
-    
-    c.save()
+    qr_images = {}
+    solution_images = {}
+    for filename in os.listdir(cards_folder):
+        match = file_pattern.fullmatch(filename)
+        if not match:
+            continue
+        card_number = int(match.group(1))
+        target = qr_images if match.group(2) == 'qr' else solution_images
+        target[card_number] = filename
+
+    if set(qr_images) != set(solution_images):
+        missing_qr = sorted(set(solution_images) - set(qr_images))
+        missing_solution = sorted(set(qr_images) - set(solution_images))
+        raise ValueError(
+            "Card image pairs are incomplete "
+            f"(missing QR: {missing_qr}; "
+            f"missing solutions: {missing_solution})."
+        )
+    card_numbers = sorted(qr_images)
+    if not card_numbers:
+        raise ValueError("No card image pairs were found.")
+
+    pdf_canvas = canvas.Canvas(output_pdf_path, pagesize=A4)
+    page_width, page_height = A4
+    card_size = PDF_CARD_SIZE
+    total_pages = (
+        len(card_numbers) + PDF_CARDS_PER_PAGE - 1
+    ) // PDF_CARDS_PER_PAGE
+
+    for page_index in range(total_pages):
+        start = page_index * PDF_CARDS_PER_PAGE
+        batch_numbers = card_numbers[
+            start:start + PDF_CARDS_PER_PAGE
+        ]
+
+        pdf_canvas.setFillColorRGB(1, 1, 1)
+        pdf_canvas.rect(
+            0, 0, page_width, page_height, stroke=0, fill=1
+        )
+        for index, x, y in get_pdf_card_positions(len(batch_numbers)):
+            card_number = batch_numbers[index]
+            qr_path = os.path.join(
+                cards_folder, qr_images[card_number]
+            )
+            draw_pdf_card_image(
+                pdf_canvas, qr_path, x, y, card_size
+            )
+        pdf_canvas.showPage()
+
+        pdf_canvas.setFillColorRGB(1, 1, 1)
+        pdf_canvas.rect(
+            0, 0, page_width, page_height, stroke=0, fill=1
+        )
+        for index, x, y in get_pdf_card_positions(
+            len(batch_numbers), mirrored=True
+        ):
+            card_number = batch_numbers[index]
+            solution_path = os.path.join(
+                cards_folder, solution_images[card_number]
+            )
+            draw_pdf_card_image(
+                pdf_canvas, solution_path, x, y, card_size
+            )
+        pdf_canvas.showPage()
+
+    pdf_canvas.save()
     print(f"\n✓ Created PDF: {output_pdf_path}")
-    print(f"  - {len(qr_images)} cards total")
+    print(f"  - {len(card_numbers)} cards total")
     print(f"  - {total_pages * 2} pages (alternating front/back)")
-    print(f"  - Ready for duplex printing!")
+    print("  - Ready for duplex printing!")
     return output_pdf_path
 
 
@@ -988,29 +1462,35 @@ def create_cards_pdf(cards_folder, output_pdf_path):
 # =============================================================================
 
 def apply_background_image(img, bg_img, scale, offset_x, offset_y, card_size):
-    """Applies scaled and offset background image to card."""
+    """Apply an image without allocating a scaled canvas larger than the card."""
+    if bg_img.width <= 0 or bg_img.height <= 0:
+        return
+
     aspect = bg_img.width / bg_img.height
-    
     if aspect > 1:
         base_h = card_size
-        base_w = int(card_size * aspect)
+        base_w = round(card_size * aspect)
     else:
         base_w = card_size
-        base_h = int(card_size / aspect)
-        
-    new_w = int(base_w * scale)
-    new_h = int(base_h * scale)
-    
-    resized = bg_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-    
-    x = (card_size - new_w) // 2 + int(offset_x * card_size)
-    y = (card_size - new_h) // 2 + int(offset_y * card_size)
-    
-    if resized.mode in ('RGBA', 'LA') or (resized.mode == 'P' and 'transparency' in resized.info):
-        resized = resized.convert("RGBA")
-        img.paste(resized, (x, y), resized)
-    else:
-        img.paste(resized, (x, y))
+        base_h = round(card_size / aspect)
+
+    safe_scale = max(0.01, min(float(scale), 3.0))
+    new_w = max(1, round(base_w * safe_scale))
+    new_h = max(1, round(base_h * safe_scale))
+    x = (card_size - new_w) // 2 + round(float(offset_x) * card_size)
+    y = (card_size - new_h) // 2 + round(float(offset_y) * card_size)
+
+    source = bg_img.convert('RGBA')
+    x_ratio = source.width / new_w
+    y_ratio = source.height / new_h
+    transformed = source.transform(
+        (card_size, card_size),
+        Image.Transform.AFFINE,
+        (x_ratio, 0, -x * x_ratio, 0, y_ratio, -y * y_ratio),
+        resample=Image.Resampling.BICUBIC,
+        fillcolor=(0, 0, 0, 0),
+    )
+    img.paste(transformed, (0, 0), transformed)
 
 
 def derive_solution_color_wash_palette(base_color, separation=1.0):
@@ -1166,7 +1646,7 @@ def render_card_background(img, settings, side="qr", seed=42):
             + round(size * 0.01)
         )
         
-        random.seed(seed)
+        rng = random.Random(seed)
         neon_colors = settings['neon_colors']
         ring_count = settings.get('neon_ring_count', 14)
         thickness = settings.get('neon_ring_thickness', 12)
@@ -1182,10 +1662,10 @@ def render_card_background(img, settings, side="qr", seed=42):
             if settings['qr_background_mode'] == "solid" and is_inside_safety:
                 continue
                 
-            num_gaps = random.randint(1, 3)
+            num_gaps = rng.randint(1, 3)
             for gap in range(num_gaps):
-                gap_start = random.randint(0, 360)
-                gap_length = random.randint(20, 60)
+                gap_start = rng.randint(0, 360)
+                gap_length = rng.randint(20, 60)
                 
                 draw.arc(
                     (center - radius, center - radius, center + radius, center + radius),
@@ -1234,33 +1714,73 @@ def render_qr_backplate(img, settings):
     img.paste(overlay, (0, 0), overlay)
 
 def render_qr_code(img, qr_code, settings):
-    """Render the QR code modules on top of the card."""
+    """Render crisp, module-aligned QR pixels on top of the card."""
     size = settings['card_size']
     center = size // 2
-    qr_size_base = get_qr_code_size_pixels(settings)
-    quiet_zone = settings.get('qr_quiet_zone', 2)
-    
-    qr_code_rgb = qr_code.convert('RGB')
-    qr_code_resized = qr_code_rgb.resize((qr_size_base, qr_size_base), Image.Resampling.LANCZOS)
-    
-    qr_l = qr_code_resized.convert('L')
-    arr = np.array(qr_l)
-    modules_mask = arr > 128
-    mask_img = Image.fromarray((modules_mask.astype('uint8') * 255)).convert('1')
-    
-    left = center - qr_size_base // 2
-    top = center - qr_size_base // 2
-    
+    requested_side = get_qr_code_size_pixels(settings)
+
+    total_modules = int(qr_code.info.get('qr_module_count', 0))
+    if total_modules <= 0:
+        total_modules = max(1, qr_code.width // 10)
+    quiet_zone = max(
+        4, int(qr_code.info.get(
+            'qr_quiet_zone', settings.get('qr_quiet_zone', 4)
+        ))
+    )
+    pixels_per_module = max(1, requested_side // total_modules)
+    rendered_side = total_modules * pixels_per_module
+
+    qr_code_resized = qr_code.convert('L').resize(
+        (rendered_side, rendered_side), Image.Resampling.NEAREST
+    )
+    modules_mask = np.asarray(qr_code_resized) > 128
+    mask_img = Image.fromarray(
+        modules_mask.astype('uint8') * 255
+    ).convert('1')
+
+    left = center - rendered_side // 2
+    top = center - rendered_side // 2
     module_color = settings['qr_module_color']
-    
-    if settings['qr_background_mode'] == "transparent":
-        bg_crop = img.crop((left, top, left + qr_size_base, top + qr_size_base)).convert('L')
-        bg_mean = np.array(bg_crop).mean()
-        if module_color == (255, 255, 255) or module_color == (0, 0, 0):
-             module_color = (0, 0, 0) if bg_mean > 127 else (255, 255, 255)
-    
-    overlay = Image.new('RGB', (qr_size_base, qr_size_base), module_color)
+
+    if settings['qr_background_mode'] == 'transparent':
+        bg_crop = img.crop(
+            (left, top, left + rendered_side, top + rendered_side)
+        ).convert('L')
+        bg_mean = np.asarray(bg_crop).mean()
+        if module_color in ((255, 255, 255), (0, 0, 0)):
+            module_color = (
+                (0, 0, 0) if bg_mean > 127 else (255, 255, 255)
+            )
+
+        quiet_color = (
+            (0, 0, 0)
+            if sum(module_color[:3]) / 3 > 127
+            else (255, 255, 255)
+        )
+        quiet_pixels = quiet_zone * pixels_per_module
+        quiet_draw = ImageDraw.Draw(img)
+        right = left + rendered_side - 1
+        bottom = top + rendered_side - 1
+        quiet_draw.rectangle(
+            (left, top, right, top + quiet_pixels - 1),
+            fill=quiet_color,
+        )
+        quiet_draw.rectangle(
+            (left, bottom - quiet_pixels + 1, right, bottom),
+            fill=quiet_color,
+        )
+        quiet_draw.rectangle(
+            (left, top, left + quiet_pixels - 1, bottom),
+            fill=quiet_color,
+        )
+        quiet_draw.rectangle(
+            (right - quiet_pixels + 1, top, right, bottom),
+            fill=quiet_color,
+        )
+
+    overlay = Image.new('RGB', (rendered_side, rendered_side), module_color)
     img.paste(overlay, (left, top), mask_img)
+
 
 def render_game_title(img, settings, side="qr"):
     """Render the game title / card label."""
@@ -1550,71 +2070,120 @@ def create_solution_side_in_memory(
     return img
 
 
-def fetch_no_api_data_from_list(urls, progress_bar=None):
-    """
-    Scrapes metadata from public Spotify pages based on a provided list of URLs.
-    """
-    songs = []
+def _fetch_public_track_metadata(url):
+    html_text, canonical_url = get_spotify_html(
+        url, expected_kind='track'
+    )
+    soup = BeautifulSoup(html_text, 'html.parser')
+    title_tag = soup.find('meta', property='og:title')
+    description_tag = soup.find('meta', property='og:description')
+    if not title_tag or not description_tag:
+        raise ValueError("Missing metadata tags")
+
+    title = title_tag.get('content', '').strip()
+    description = description_tag.get('content', '')
+    artist = description.split(' · ')[0].strip()
+    if not title or not artist:
+        raise ValueError("Incomplete metadata")
+
+    year, year_source = get_year_and_source(title, artist, None)
+    return {
+        'name': sanitize_name(title),
+        'original_name': title,
+        'original_year': None,
+        'year': year,
+        'year_source': year_source,
+        'artist': artist,
+        'link': canonical_url,
+    }
+
+
+def fetch_no_api_data_from_list(
+    urls, progress_bar=None, errors_out=None
+):
+    """Scrape validated tracks concurrently with bounded worker count."""
+    if len(urls) > MAX_TRACK_LINKS:
+        raise SpotifyAPIError(
+            f"A maximum of {MAX_TRACK_LINKS} tracks can be processed at once."
+        )
+    try:
+        validated_urls = [
+            canonicalize_spotify_url(url, expected_kind='track')
+            for url in urls
+        ]
+    except InputValidationError as exc:
+        raise SpotifyAPIError(str(exc)) from exc
+
+    total = len(validated_urls)
+    if total == 0:
+        return []
+
+    ordered_songs = [None] * total
     errors = []
-    total = len(urls)
-    
-    for i, url in enumerate(urls):
-        idx = i + 1
-        print(f"  [{idx}/{total}] Scraping: {url}")
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        try:
-            res = requests.get(url, headers=headers, timeout=10)
-            soup = BeautifulSoup(res.text, 'html.parser')
-            
-            # Metadata from OpenGraph tags
-            title_tag = soup.find("meta", property="og:title")
-            desc_tag = soup.find("meta", property="og:description")
-            if not title_tag or not desc_tag:
-                errors.append({"url": url, "error": "Missing metadata tags"})
-                continue
+    worker_count = min(4, total)
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = {
+            executor.submit(_fetch_public_track_metadata, url): (index, url)
+            for index, url in enumerate(validated_urls)
+        }
+        completed = 0
+        for future in as_completed(futures):
+            index, url = futures[future]
+            completed += 1
+            try:
+                song = future.result()
+            except (
+                InputValidationError,
+                requests.RequestException,
+                KeyError,
+                TypeError,
+                ValueError,
+            ) as exc:
+                print(f"  Error scraping {url}: {exc}")
+                errors.append({
+                    'url': url,
+                    'error': type(exc).__name__,
+                })
+                progress_text = f"Skipped {completed}/{total}"
+            else:
+                ordered_songs[index] = song
+                print(
+                    f"  {song['year']} | "
+                    f"{song['artist']} - {song['original_name']}"
+                )
+                progress_text = (
+                    f"Scraped {completed}/{total}: "
+                    f"{song['original_name'][:30]}..."
+                )
 
-            title = title_tag['content']
-            desc = desc_tag['content']
-            artist = desc.split(" · ")[0]
-            
-            # FIX: correct argument order — (title, artist, fallback)
-            year, year_source = get_year_and_source(title, artist, None)
-            
-            song = {
-                'name': sanitize_name(title),
-                'original_name': title,
-                'original_year': None,
-                'year': year,
-                'year_source': year_source,
-                'artist': artist,
-                'link': url,
-            }
-            songs.append(song)
-            
-            print(f"  {year} | {artist} - {title}")
-            time.sleep(0.5)
-            
-            # Update Progress — fixed off-by-one
             if progress_bar:
-                percent = idx / total
-                progress_bar.progress(percent, text=f"Scraped {idx}/{total}: {title[:30]}...")
+                progress_bar.progress(
+                    completed / total, text=progress_text
+                )
 
-        except Exception as e:
-            print(f"  Error scraping {url}: {e}")
-            errors.append({"url": url, "error": str(e)})
-    
+    songs = [song for song in ordered_songs if song is not None]
+    if errors_out is not None:
+        errors_out.extend(errors)
     if errors:
         print(f"\n⚠ {len(errors)} song(s) failed to scrape:")
-        for err in errors:
-            print(f"  - {err['url']}: {err['error']}")
+        for error in errors:
+            print(f"  - {error['url']}: {error['error']}")
+    if not songs:
+        raise SpotifyAPIError(
+            "No track metadata could be fetched from Spotify's public pages."
+        )
 
-    no_year = [s for s in songs if s['year'] is None]
+    no_year = [song for song in songs if song['year'] is None]
     if no_year:
-        print(f"\n⚠ {len(no_year)} song(s) have no year — edit songs.json manually before re-running:")
-        for s in no_year:
-            print(f"  - {s['artist']} — {s['original_name']}")
+        print(
+            f"\n⚠ {len(no_year)} song(s) have no year — "
+            "edit songs.json manually before re-running:"
+        )
+        for song in no_year:
+            print(f"  - {song['artist']} — {song['original_name']}")
 
     return songs
+
 
 def create_pdf_in_memory(songs, progress_bar=None, settings_override=None):
     if not songs:
@@ -1627,16 +2196,11 @@ def create_pdf_in_memory(songs, progress_bar=None, settings_override=None):
     width, height = A4
     
     # Grid settings (6.5x6.5 cm cards, 12 per page)
-    card_size, margin_x, margin_y, gap_x, gap_y = get_pdf_grid_layout(
-        width, height
-    )
-    cols = PDF_GRID_COLS
+    card_size = PDF_CARD_SIZE
 
     total_cards = len(songs)
     years = [song['year'] for song in songs]
     starting_number = int(settings.get('card_number_start', 1))
-
-    card_label = settings.get('card_label', None)
 
     for i in range(0, total_cards, PDF_CARDS_PER_PAGE):
         batch_songs = list(songs[i:i + PDF_CARDS_PER_PAGE])
@@ -1645,17 +2209,15 @@ def create_pdf_in_memory(songs, progress_bar=None, settings_override=None):
         c.setFillColorRGB(1, 1, 1)
         c.rect(0, 0, width, height, stroke=0, fill=1)
 
-        for idx, song in enumerate(batch_songs):
+        for idx, x, y in get_pdf_card_positions(len(batch_songs)):
+            song = batch_songs[idx]
             card_number = starting_number + i + idx
-            col = idx % cols
-            row = (idx // cols) 
-            x = margin_x + col * (card_size + gap_x)
-            y = height - margin_y - (row + 1) * card_size - row * gap_y
-            
+
             base_qr = create_qr_code(song['link'])
             # Per-card unique ring pattern based on link hash
             qr_pil = create_qr_with_neon_rings_in_memory(
-                base_qr, seed=hash(song['link']), settings_override=settings,
+                base_qr, seed=stable_seed(song['link']),
+                settings_override=settings,
                 card_number=card_number
             )
 
@@ -1674,15 +2236,12 @@ def create_pdf_in_memory(songs, progress_bar=None, settings_override=None):
         c.setFillColorRGB(1, 1, 1)
         c.rect(0, 0, width, height, stroke=0, fill=1)
 
-        for idx, song in enumerate(batch_songs):
+        for idx, x, y in get_pdf_card_positions(
+            len(batch_songs), mirrored=True
+        ):
+            song = batch_songs[idx]
             card_number = starting_number + i + idx
-            orig_col = idx % cols
-            mirrored_col = (cols - 1) - orig_col
-            row = (idx // cols)
-            
-            x = margin_x + mirrored_col * (card_size + gap_x)
-            y = height - margin_y - (row + 1) * card_size - row * gap_y
-            
+
             sol_pil = create_solution_side_in_memory(
                 song['name'], song['artist'], song['year'], years,
                 settings_override=settings, card_number=card_number
