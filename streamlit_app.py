@@ -1,3 +1,5 @@
+import html
+
 import streamlit as st
 from PIL import Image
 import pandas as pd
@@ -76,6 +78,40 @@ def default_spotify_redirect_uri():
     return url.replace('://localhost', '://127.0.0.1', 1)
 
 
+def render_spotify_authorize_button(url):
+    """Render OAuth navigation in this tab so the app session stays visible."""
+    safe_url = html.escape(str(url), quote=True)
+    st.markdown(
+        f"""
+        <a href="{safe_url}" target="_self" class="spotify-authorize-button">
+            Authorize with Spotify
+        </a>
+        <style>
+            .spotify-authorize-button {{
+                align-items: center;
+                background: #1db954;
+                border: 1px solid rgba(255, 255, 255, 0.2);
+                border-radius: 0.5rem;
+                color: #ffffff !important;
+                display: inline-flex;
+                font-size: 1rem;
+                font-weight: 600;
+                justify-content: center;
+                line-height: 1.6;
+                min-height: 2.5rem;
+                padding: 0.25rem 0.75rem;
+                text-decoration: none !important;
+            }}
+            .spotify-authorize-button:hover {{
+                background: #1ed760;
+                border-color: rgba(255, 255, 255, 0.35);
+            }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 import uuid
 
 def add_color_cb(key_prefix):
@@ -141,6 +177,7 @@ spotify_callback_state = st.query_params.get('state')
 spotify_callback_error = st.query_params.get('error')
 if spotify_callback_error:
     utils.discard_spotify_oauth(spotify_callback_state)
+    st.session_state.pop('spotify_oauth_url', None)
     st.session_state.spotify_oauth_notice = (
         'error', f"Spotify authorization failed: {spotify_callback_error}"
     )
@@ -150,10 +187,12 @@ elif spotify_callback_code:
         st.session_state.spotify_auth = utils.complete_spotify_oauth(
             spotify_callback_code, spotify_callback_state
         )
+        st.session_state.pop('spotify_oauth_url', None)
         st.session_state.spotify_oauth_notice = (
             'success', 'Spotify account connected successfully.'
         )
     except utils.SpotifyAPIError as exc:
+        st.session_state.pop('spotify_oauth_url', None)
         st.session_state.spotify_oauth_notice = ('error', str(exc))
     st.query_params.clear()
 
@@ -203,7 +242,9 @@ with st.sidebar:
             
         st.divider()
 
-        with st.expander("🔑 Connect Spotify", expanded=False):
+        with st.expander(
+            "🔑 Connect Spotify", expanded=spotify_oauth_notice is not None
+        ):
             st.caption(
                 "User authorization enables complete owned/collaborative playlists "
                 "and Spotify album release years."
@@ -243,6 +284,7 @@ with st.sidebar:
                     )
 
                 if prepare_spotify_login:
+                    st.session_state.pop('spotify_oauth_url', None)
                     try:
                         st.session_state.spotify_oauth_url = (
                             utils.begin_spotify_oauth(
@@ -256,13 +298,10 @@ with st.sidebar:
                 spotify_oauth_url = st.session_state.get('spotify_oauth_url')
                 if spotify_oauth_url:
                     st.info(
-                        "Confirm the Redirect URI is registered in Spotify, "
-                        "then authorize the connected Spotify account."
+                        "Confirm the Redirect URI is registered in Spotify, then "
+                        "continue to Spotify. You will return here after approval."
                     )
-                    st.link_button(
-                        "Authorize with Spotify", spotify_oauth_url,
-                        type="primary",
-                    )
+                    render_spotify_authorize_button(spotify_oauth_url)
         
         st.divider()
         st.header("Feedback")
