@@ -79,11 +79,12 @@ def default_spotify_redirect_uri():
 
 
 def render_spotify_authorize_button(url):
-    """Render OAuth navigation in this tab so the app session stays visible."""
+    """Render OAuth navigation outside frames that Spotify refuses to use."""
     safe_url = html.escape(str(url), quote=True)
     st.markdown(
         f"""
-        <a href="{safe_url}" target="_self" class="spotify-authorize-button">
+        <a href="{safe_url}" target="_blank" rel="noopener noreferrer"
+           class="spotify-authorize-button">
             Authorize with Spotify
         </a>
         <style>
@@ -299,7 +300,8 @@ with st.sidebar:
                 if spotify_oauth_url:
                     st.info(
                         "Confirm the Redirect URI is registered in Spotify, then "
-                        "continue to Spotify. You will return here after approval."
+                        "continue in the new tab. Spotify will return that tab to "
+                        "this app after you approve access."
                     )
                     render_spotify_authorize_button(spotify_oauth_url)
         
