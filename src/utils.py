@@ -38,7 +38,7 @@ from src.input_validation import (
     MAX_TRACK_LINKS, InputValidationError, canonicalize_spotify_url,
 )
 
-UTILS_API_VERSION = 1
+UTILS_API_VERSION = 2
 CARD_PHYSICAL_SIZE_CM = 6.5
 DEFAULT_QR_CODE_SIZE_CM = 2.5
 DEFAULT_QR_BORDER_CM = 0.1
@@ -64,8 +64,22 @@ def get_qr_code_size_pixels(settings):
     return max(1, round(settings['card_size'] * settings['qr_size_ratio']))
 
 
+def get_qr_render_geometry(qr_code, settings):
+    """Return module-aligned geometry for the borderless QR data square."""
+    module_count = int(qr_code.info.get('qr_module_count', 0))
+    if module_count <= 0:
+        module_count = max(1, qr_code.width // 10)
+    requested_side = get_qr_code_size_pixels(settings)
+    pixels_per_module = max(1, requested_side // module_count)
+    return (
+        module_count,
+        pixels_per_module,
+        module_count * pixels_per_module,
+    )
+
+
 def get_qr_backplate_padding_pixels(settings):
-    """Return the physical QR border width, with pixel-setting compatibility."""
+    """Return the sole physical QR quiet-zone width in pixels."""
     padding_cm = settings.get('qr_backplate_padding_cm')
     if padding_cm is not None:
         return max(0, card_distance_cm_to_pixels(
@@ -146,10 +160,9 @@ DEFAULT_DESIGN_SETTINGS = {
     "qr_background_mode": "solid", # "transparent" or "solid"
     "qr_background_color": (0, 0, 0), # solid backplate color
     "qr_module_color": (255, 255, 255),
-    "qr_quiet_zone": 4,
     "qr_backplate_padding": 0,
     "qr_backplate_padding_cm": DEFAULT_QR_BORDER_CM,
-    "qr_backplate_radius": 20,
+    "qr_backplate_radius": 0,
     "qr_size_ratio": DEFAULT_QR_SIZE_RATIO,
     
     "neon_ring_opacity": 1.0,
@@ -1038,18 +1051,16 @@ def scrape_playlist_track_links(playlist_url) -> list[str]:
 # CARD GENERATION FUNCTIONS
 # =============================================================================
 
-def create_qr_code(song_link, quiet_zone=4):
-    """Generate an inverted QR code with a standards-compliant quiet zone."""
-    quiet_zone = max(4, int(quiet_zone))
-    qr = qrcode.QRCode(version=1, box_size=10, border=quiet_zone)
+def create_qr_code(song_link):
+    """Generate an inverted QR data square without embedded padding."""
+    qr = qrcode.QRCode(version=1, box_size=10, border=0)
     qr.add_data(song_link)
     qr.make(fit=True)
     generated = qr.make_image(
         fill_color='black', back_color='white'
     ).convert('L')
     inverted = ImageOps.invert(generated)
-    inverted.info['qr_module_count'] = qr.modules_count + 2 * quiet_zone
-    inverted.info['qr_quiet_zone'] = quiet_zone
+    inverted.info['qr_module_count'] = qr.modules_count
     return inverted
 
 
@@ -1599,7 +1610,9 @@ def render_solution_color_wash(img, settings, seed=42):
     img.paste(wash)
 
 
-def render_card_background(img, settings, side="qr", seed=42):
+def render_card_background(
+    img, settings, side="qr", seed=42, qr_code=None
+):
     """Render the card background (solid, neon rings, or image)."""
     size = settings['card_size']
     
@@ -1641,7 +1654,11 @@ def render_card_background(img, settings, side="qr", seed=42):
         )
         max_radius = min(center, size - 1 - center) - edge_clearance
         
-        qr_size = get_qr_code_size_pixels(settings)
+        qr_size = (
+            get_qr_render_geometry(qr_code, settings)[2]
+            if qr_code is not None
+            else get_qr_code_size_pixels(settings)
+        )
         qr_padding = get_qr_backplate_padding_pixels(settings)
         safety_radius = (
             (qr_size // 2) + qr_padding
@@ -1687,13 +1704,13 @@ def render_card_background(img, settings, side="qr", seed=42):
             width=border_width
         )
 
-def render_qr_backplate(img, settings):
-    """Render a solid backplate for the QR code if configured."""
+def render_qr_backplate(img, qr_code, settings):
+    """Render the single configured quiet zone around the QR data."""
     if settings['qr_background_mode'] != "solid":
         return
         
     size = settings['card_size']
-    qr_size = get_qr_code_size_pixels(settings)
+    qr_size = get_qr_render_geometry(qr_code, settings)[2]
     padding = get_qr_backplate_padding_pixels(settings)
     radius = settings['qr_backplate_radius']
     bg_color = settings['qr_background_color']
@@ -1719,18 +1736,9 @@ def render_qr_code(img, qr_code, settings):
     """Render crisp, module-aligned QR pixels on top of the card."""
     size = settings['card_size']
     center = size // 2
-    requested_side = get_qr_code_size_pixels(settings)
-
-    total_modules = int(qr_code.info.get('qr_module_count', 0))
-    if total_modules <= 0:
-        total_modules = max(1, qr_code.width // 10)
-    quiet_zone = max(
-        4, int(qr_code.info.get(
-            'qr_quiet_zone', settings.get('qr_quiet_zone', 4)
-        ))
+    _, _, rendered_side = get_qr_render_geometry(
+        qr_code, settings
     )
-    pixels_per_module = max(1, requested_side // total_modules)
-    rendered_side = total_modules * pixels_per_module
 
     qr_code_resized = qr_code.convert('L').resize(
         (rendered_side, rendered_side), Image.Resampling.NEAREST
@@ -1759,32 +1767,37 @@ def render_qr_code(img, qr_code, settings):
             if sum(module_color[:3]) / 3 > 127
             else (255, 255, 255)
         )
-        quiet_pixels = quiet_zone * pixels_per_module
+        quiet_pixels = get_qr_backplate_padding_pixels(settings)
         quiet_draw = ImageDraw.Draw(img)
         right = left + rendered_side - 1
         bottom = top + rendered_side - 1
-        quiet_draw.rectangle(
-            (left, top, right, top + quiet_pixels - 1),
-            fill=quiet_color,
-        )
-        quiet_draw.rectangle(
-            (left, bottom - quiet_pixels + 1, right, bottom),
-            fill=quiet_color,
-        )
-        quiet_draw.rectangle(
-            (left, top, left + quiet_pixels - 1, bottom),
-            fill=quiet_color,
-        )
-        quiet_draw.rectangle(
-            (right - quiet_pixels + 1, top, right, bottom),
-            fill=quiet_color,
-        )
+        if quiet_pixels:
+            outer_left = left - quiet_pixels
+            outer_top = top - quiet_pixels
+            outer_right = right + quiet_pixels
+            outer_bottom = bottom + quiet_pixels
+            quiet_draw.rectangle(
+                (outer_left, outer_top, outer_right, top - 1),
+                fill=quiet_color,
+            )
+            quiet_draw.rectangle(
+                (outer_left, bottom + 1, outer_right, outer_bottom),
+                fill=quiet_color,
+            )
+            quiet_draw.rectangle(
+                (outer_left, top, left - 1, bottom),
+                fill=quiet_color,
+            )
+            quiet_draw.rectangle(
+                (right + 1, top, outer_right, bottom),
+                fill=quiet_color,
+            )
 
     overlay = Image.new('RGB', (rendered_side, rendered_side), module_color)
     img.paste(overlay, (left, top), mask_img)
 
 
-def render_game_title(img, settings, side="qr"):
+def render_game_title(img, settings, side="qr", qr_code=None):
     """Render the game title / card label."""
     prefix = "qr" if side == "qr" else "sol"
     
@@ -1819,9 +1832,13 @@ def render_game_title(img, settings, side="qr"):
     ink_left, ink_top, ink_right, ink_bottom = ink_bbox or (0, 0, tw, th)
     
     center = size // 2
+    qr_size = (
+        get_qr_render_geometry(qr_code, settings)[2]
+        if side == 'qr' and qr_code is not None
+        else get_qr_code_size_pixels(settings)
+    )
     qr_bound = (
-        center
-        + get_qr_code_size_pixels(settings) // 2
+        center + qr_size // 2
         + get_qr_backplate_padding_pixels(settings)
     )
     bw = settings.get('sol_border_width', 142) // 2
@@ -1944,10 +1961,12 @@ def create_qr_with_neon_rings_in_memory(
     # Base background (will be overriden by render_card_background if needed)
     img = Image.new("RGB", (size, size), settings['qr_bg_color'])
     
-    render_card_background(img, settings, side="qr", seed=seed)
-    render_qr_backplate(img, settings)
+    render_card_background(
+        img, settings, side="qr", seed=seed, qr_code=qr_code
+    )
+    render_qr_backplate(img, qr_code, settings)
     render_qr_code(img, qr_code, settings)
-    render_game_title(img, settings, side="qr")
+    render_game_title(img, settings, side="qr", qr_code=qr_code)
     render_card_number(img, card_number, settings, side="qr")
         
     return img

@@ -7,7 +7,7 @@ import pandas as pd
 import src.input_validation as input_validation
 import src.utils as utils
 
-EXPECTED_UTILS_API_VERSION = 1
+EXPECTED_UTILS_API_VERSION = 2
 if getattr(utils, 'UTILS_API_VERSION', 0) < EXPECTED_UTILS_API_VERSION:
     utils = importlib.reload(utils)
 
@@ -475,14 +475,17 @@ with st.sidebar:
         st.subheader("📱 QR Settings")
         qr_bg_mode = st.selectbox("QR Background Mode", ["solid", "transparent"], key="qr_bg_mode")
         qr_module_color = st.color_picker("QR Module Color", value="#FFFFFF", key="qr_mod_c")
-        qr_border_cm = utils.DEFAULT_QR_BORDER_CM
+        qr_border_cm = st.slider(
+            "QR Quiet Zone (cm)", 0.0, 0.5,
+            utils.DEFAULT_QR_BORDER_CM, 0.05, key="qr_border_cm",
+            help="The single blank border surrounding the QR data.",
+        )
         if qr_bg_mode == "solid":
             st.session_state.qr_backplate_color = st.color_picker("QR Backplate Color", value="#000000", key="qr_bp_c")
-            qr_border_cm = st.slider(
-                "QR Border (cm)", 0.0, 0.5,
-                utils.DEFAULT_QR_BORDER_CM, 0.05, key="qr_border_cm",
+            st.session_state.qr_radius = st.slider(
+                "Backplate Corner Radius", 0, 100, 0,
+                key="qr_quiet_radius",
             )
-            st.session_state.qr_radius = st.slider("Backplate Corner Radius", 0, 100, 20, key="qr_rad")
         qr_size_cm = st.slider(
             "QR Code Size (cm)", 1.0, 5.0,
             utils.DEFAULT_QR_CODE_SIZE_CM, 0.1, key="qr_size_cm",
@@ -589,7 +592,9 @@ with st.sidebar:
         "qr_module_color": qr_module_color,
         "qr_background_color": st.session_state.get('qr_backplate_color', "#000000"),
         "qr_backplate_padding_cm": qr_border_cm,
-        "qr_backplate_radius": st.session_state.get('qr_rad', 20),
+        "qr_backplate_radius": st.session_state.get(
+            'qr_quiet_radius', 0
+        ),
         "qr_size_ratio": qr_size_cm / utils.CARD_PHYSICAL_SIZE_CM,
         "qr_card_number_opacity": st.session_state.get('qr_card_num_opacity', 42),
         "qr_title_enabled": st.session_state.get('qr_t_en', False),

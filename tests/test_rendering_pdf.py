@@ -15,13 +15,41 @@ TRACK_URL = (
 
 
 class RenderingTests(unittest.TestCase):
-    def test_qr_has_four_module_quiet_zone(self):
+    def test_qr_has_no_embedded_quiet_zone(self):
         qr = utils.create_qr_code(TRACK_URL)
         module_count = qr.info["qr_module_count"]
-        self.assertEqual(qr.info["qr_quiet_zone"], 4)
         self.assertEqual(qr.size, (module_count * 10, module_count * 10))
+        self.assertNotIn("qr_quiet_zone", qr.info)
+
+    def test_qr_has_one_exact_physical_quiet_zone(self):
+        qr = utils.create_qr_code(TRACK_URL)
+        settings = utils.get_settings({
+            "card_size": 2000,
+            "qr_bg_type": "solid",
+            "qr_bg_color": (255, 0, 0),
+            "qr_background_mode": "solid",
+            "qr_background_color": (0, 0, 0),
+            "qr_module_color": (255, 255, 255),
+            "qr_backplate_radius": 0,
+            "google_font": "",
+        })
+        card = utils.create_qr_with_neon_rings_in_memory(
+            qr, settings_override=settings
+        )
+        _, _, rendered_side = utils.get_qr_render_geometry(qr, settings)
+        quiet_pixels = utils.get_qr_backplate_padding_pixels(settings)
+        center = settings["card_size"] // 2
+        qr_top = center - rendered_side // 2
+        quiet_top = qr_top - quiet_pixels
+
         self.assertEqual(
-            qr.crop((0, 0, 40, qr.height)).getextrema(), (0, 0)
+            quiet_pixels,
+            utils.card_distance_cm_to_pixels(2000, 0.1),
+        )
+        self.assertEqual(card.getpixel((center, quiet_top)), (0, 0, 0))
+        self.assertEqual(card.getpixel((center, qr_top - 1)), (0, 0, 0))
+        self.assertEqual(
+            card.getpixel((center, quiet_top - 1)), (255, 0, 0)
         )
 
     def test_qr_rendering_is_integer_aligned_and_preserves_rng(self):
@@ -43,9 +71,7 @@ class RenderingTests(unittest.TestCase):
         self.assertEqual(random.getstate(), before)
         self.assertEqual(card.size, (2000, 2000))
 
-        requested = utils.get_qr_code_size_pixels(settings)
-        modules = qr.info["qr_module_count"]
-        rendered = modules * (requested // modules)
+        modules, _, rendered = utils.get_qr_render_geometry(qr, settings)
         self.assertEqual(rendered % modules, 0)
 
     def test_background_transform_is_bounded_to_card(self):
