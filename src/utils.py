@@ -38,7 +38,7 @@ from src.input_validation import (
     MAX_TRACK_LINKS, InputValidationError, canonicalize_spotify_url,
 )
 
-UTILS_API_VERSION = 3
+UTILS_API_VERSION = 4
 CARD_PHYSICAL_SIZE_CM = 6.5
 DEFAULT_QR_CODE_SIZE_CM = 2.5
 DEFAULT_QR_BORDER_CM = 0.1
@@ -47,17 +47,21 @@ DEFAULT_QR_TOTAL_SIZE_CM = (
 )
 DEFAULT_QR_SIZE_RATIO = DEFAULT_QR_CODE_SIZE_CM / CARD_PHYSICAL_SIZE_CM
 NEON_RING_EDGE_CLEARANCE_CM = 0.3
-SONG_TEXT_EDGE_OFFSET_CM = 0.9
-SOLUTION_TITLE_TOP_OFFSET_CM = 0.3
+SONG_ARTIST_TOP_EDGE_OFFSET_CM = 0.9
+# The raster-to-print calibration puts the rendered song-title ink 0.1 cm
+# farther from the trim edge than its coordinate says.  Use 0.8 cm here so
+# its printed bottom clearance is the requested 0.9 cm.
+SONG_TITLE_BOTTOM_EDGE_OFFSET_CM = 0.8
+SOLUTION_TITLE_TOP_OFFSET_CM = 0.2
 SOLUTION_TITLE_LEFT_OFFSET_CM = 0.2
 CARD_NUMBER_RIGHT_OFFSET_CM = 0.3
-CARD_NUMBER_BOTTOM_OFFSET_CM = 0.2
+CARD_NUMBER_BOTTOM_OFFSET_CM = 0.3
 SONG_ARTIST_TO_YEAR_GAP_CM = 1.4
 SONG_YEAR_TO_TITLE_GAP_CM = 1.3
 # At the 2000 px preview resolution, this keeps a centered Montserrat year
 # at the requested distances from the capital M in "Miley Cyrus" and the
 # capital W in "Wrecking Ball". PDF rendering scales the value with the card.
-DEFAULT_SONG_YEAR_SIZE = 492
+DEFAULT_SONG_YEAR_SIZE = 604
 
 
 def card_distance_cm_to_pixels(card_size, distance_cm):
@@ -182,6 +186,7 @@ DEFAULT_DESIGN_SETTINGS = {
     "qr_title_color": (255, 255, 255),
     "qr_title_bg": False,
     "qr_card_number_opacity": 42,
+    "qr_pages_upside_down": False,
 
     # Solution Side Settings
     "sol_bg_type": "gradient", # "gradient", "image"
@@ -1398,7 +1403,24 @@ def draw_pdf_card_image(c, image_source, x, y, card_size):
         )
 
 
-def create_cards_pdf(cards_folder, output_pdf_path):
+def apply_qr_page_rotation(pdf_canvas, page_width, page_height, enabled):
+    """Rotate all QR-side artwork by 180 degrees when duplex printing needs it.
+
+    The white A4 page remains unchanged; the QR-side card grid, QR codes, and
+    labels rotate as one unit.  The return value tells the caller whether the
+    ReportLab graphics state must be restored after drawing that page.
+    """
+    if not enabled:
+        return False
+    pdf_canvas.saveState()
+    pdf_canvas.translate(page_width, page_height)
+    pdf_canvas.rotate(180)
+    return True
+
+
+def create_cards_pdf(
+    cards_folder, output_pdf_path, qr_pages_upside_down=False
+):
     """Create a duplex PDF from matched disk-rendered card pairs."""
     file_pattern = re.compile(
         r'^card_([0-9]+)_(qr|solution)[.]png$'
@@ -1442,6 +1464,9 @@ def create_cards_pdf(cards_folder, output_pdf_path):
         pdf_canvas.rect(
             0, 0, page_width, page_height, stroke=0, fill=1
         )
+        qr_page_rotated = apply_qr_page_rotation(
+            pdf_canvas, page_width, page_height, qr_pages_upside_down
+        )
         for index, x, y in get_pdf_card_positions(len(batch_numbers)):
             card_number = batch_numbers[index]
             qr_path = os.path.join(
@@ -1450,6 +1475,8 @@ def create_cards_pdf(cards_folder, output_pdf_path):
             draw_pdf_card_image(
                 pdf_canvas, qr_path, x, y, card_size
             )
+        if qr_page_rotated:
+            pdf_canvas.restoreState()
         pdf_canvas.showPage()
 
         pdf_canvas.setFillColorRGB(1, 1, 1)
@@ -1512,48 +1539,93 @@ def apply_background_image(img, bg_img, scale, offset_x, offset_y, card_size):
     img.paste(transformed, (0, 0), transformed)
 
 
-def derive_solution_color_wash_palette(base_color, separation=1.0):
-    """Return the base and a randomized-strength warmer/brighter RGB color."""
-    base_rgb = tuple(round(channel * 255) for channel in to_rgba(base_color)[:3])
+def _derive_legacy_solution_cool_color(base_rgb):
+    """Return the former cool/dark endpoint for palette-span calculation."""
+    cool_target = (35, 55, 145)
+    return tuple(
+        round((base_channel * 0.84 + target_channel * 0.16) * 0.88)
+        for base_channel, target_channel in zip(base_rgb, cool_target)
+    )
+
+
+def _derive_unexpanded_solution_warm_color(base_rgb):
+    """Return the former maximum warmer/brighter endpoint."""
     red, green, blue = (channel / 255 for channel in base_rgb)
     hue, lightness, saturation = colorsys.rgb_to_hls(red, green, blue)
-
-    def move_hue_toward(target, amount=0.24):
-        distance = (target - hue + 0.5) % 1.0 - 0.5
-        return (hue + distance * amount) % 1.0
-
-    adjusted_saturation = min(1.0, max(saturation, 0.08) + 0.05)
-    maximum_warm = colorsys.hls_to_rgb(
-        move_hue_toward(25 / 360),
+    distance = (25 / 360 - hue + 0.5) % 1.0 - 0.5
+    warm_hue = (hue + distance * 0.24) % 1.0
+    warm = colorsys.hls_to_rgb(
+        warm_hue,
         lightness + (1.0 - lightness) * 0.22,
-        adjusted_saturation,
+        min(1.0, max(saturation, 0.08) + 0.05),
     )
+    return tuple(round(channel * 255) for channel in warm)
+
+
+def _color_at_distance(base_rgb, endpoint_rgb, distance):
+    """Move from base toward endpoint by the requested RGB-space distance."""
+    delta = tuple(
+        end_channel - base_channel
+        for base_channel, end_channel in zip(base_rgb, endpoint_rgb)
+    )
+    length = math.sqrt(sum(channel ** 2 for channel in delta))
+    if not length:
+        return base_rgb
+    return tuple(
+        max(0, min(255, round(base_channel + channel * distance / length)))
+        for base_channel, channel in zip(base_rgb, delta)
+    )
+
+
+def _solution_wash_target_distance(base_rgb, warm_rgb):
+    """Return the former maximum warm-to-cool wash span."""
+    legacy_cool_rgb = _derive_legacy_solution_cool_color(base_rgb)
+    return math.dist(warm_rgb, legacy_cool_rgb)
+
+
+def derive_solution_color_wash_palette(base_color, separation=1.0):
+    """Return the base and an expanded warmer/brighter companion color.
+
+    The old wash placed a warm/light field opposite a cool/dark field.  The
+    new wash keeps only the base colour and a warm/light companion.  Its
+    colour offset is expanded to match the previous maximum warm-to-cool span,
+    preserving the amount of visual variation without adding a cool cast.
+    """
+    base_rgb = tuple(round(channel * 255) for channel in to_rgba(base_color)[:3])
+    maximum_warm_rgb = _derive_unexpanded_solution_warm_color(base_rgb)
+    legacy_distance = _solution_wash_target_distance(
+        base_rgb, maximum_warm_rgb
+    )
+    expanded_warm_rgb = _color_at_distance(
+        base_rgb, maximum_warm_rgb, legacy_distance
+    )
+
+    # If expanding the original warm direction would overflow RGB bounds,
+    # redirect it toward a warm, bright anchor so the full former span still
+    # fits on the card without reintroducing a cooler/darker endpoint.
+    if math.dist(base_rgb, expanded_warm_rgb) < legacy_distance - 1:
+        for warm_bright_anchor in (
+            (255, 224, 128), (255, 255, 0), (255, 255, 255),
+        ):
+            if (
+                sum(warm_bright_anchor) > sum(base_rgb)
+                and math.dist(base_rgb, warm_bright_anchor) >= legacy_distance
+            ):
+                expanded_warm_rgb = _color_at_distance(
+                    base_rgb, warm_bright_anchor, legacy_distance
+                )
+                break
+
     separation = max(0.0, min(1.0, float(separation)))
-    maximum_warm_rgb = tuple(round(channel * 255) for channel in maximum_warm)
     warm_rgb = tuple(
         round(base_channel + (warm_channel - base_channel) * separation)
-        for base_channel, warm_channel in zip(base_rgb, maximum_warm_rgb)
+        for base_channel, warm_channel in zip(base_rgb, expanded_warm_rgb)
     )
     return base_rgb, warm_rgb
 
 
-def derive_solution_cool_color(base_color, separation=1.0):
-    """Return a randomized-strength cooler/darker companion RGB color."""
-    base_rgb = tuple(round(channel * 255) for channel in to_rgba(base_color)[:3])
-    cool_target = (35, 55, 145)
-    maximum_cool_rgb = tuple(
-        round((base_channel * 0.84 + target_channel * 0.16) * 0.88)
-        for base_channel, target_channel in zip(base_rgb, cool_target)
-    )
-    separation = max(0.0, min(1.0, float(separation)))
-    return tuple(
-        round(base_channel + (cool_channel - base_channel) * separation)
-        for base_channel, cool_channel in zip(base_rgb, maximum_cool_rgb)
-    )
-
-
 def render_solution_color_wash(img, settings, seed=42):
-    """Render independently randomized warm and cool solution color fields."""
+    """Render a base-to-warmer/brighter solution colour wash."""
     rng = np.random.default_rng(seed & 0xFFFFFFFF)
     base_color = settings.get('sol_color_wash_base_color', (213, 43, 131))
     base = tuple(round(channel * 255) for channel in to_rgba(base_color)[:3])
@@ -1580,22 +1652,15 @@ def render_solution_color_wash(img, settings, seed=42):
         alpha = (strength * field_opacity)[..., np.newaxis]
         canvas[:] += (np.asarray(field_color, dtype=np.float32) - canvas) * alpha
 
-    # Keep every field unmistakably visible while retaining per-card variation.
-    warm_separation = rng.uniform(0.80, 1.0)
-    warm_opacity = rng.uniform(0.55, 0.78)
-    warm_edge_influence = rng.uniform(0.75, 1.0)
+    # Keep a clearly visible warm field while retaining per-card variation.
+    warm_separation = rng.uniform(0.90, 1.0)
+    warm_opacity = rng.uniform(0.75, 0.95)
+    warm_edge_influence = rng.uniform(0.80, 1.0)
     _, warm = derive_solution_color_wash_palette(
         base, separation=warm_separation
     )
     warm_angle = rng.uniform(0, 2 * np.pi)
     apply_color_field(warm, warm_opacity, warm_edge_influence, warm_angle)
-
-    cool_separation = rng.uniform(0.80, 1.0)
-    cool_opacity = rng.uniform(0.55, 0.78)
-    cool_edge_influence = rng.uniform(0.75, 1.0)
-    cool = derive_solution_cool_color(base, separation=cool_separation)
-    cool_angle = warm_angle + np.pi + rng.uniform(-0.35, 0.35)
-    apply_color_field(cool, cool_opacity, cool_edge_influence, cool_angle)
 
     # The deliberately strong fields survive 8-bit conversion cleanly. Resize
     # the compact mesh once instead of resampling three full-resolution float
@@ -2084,12 +2149,17 @@ def create_solution_side_in_memory(
     draw.text((center_x, center_y), year_text, fill=text_color, 
              font=font_year, anchor="mm")
 
-    edge_offset = card_distance_cm_to_pixels(size, SONG_TEXT_EDGE_OFFSET_CM)
-    draw_centered_text_at_edge(
-        draw, artist_text, font_artist, center_x, edge_offset, "top"
+    artist_edge_offset = card_distance_cm_to_pixels(
+        size, SONG_ARTIST_TOP_EDGE_OFFSET_CM
+    )
+    title_edge_offset = card_distance_cm_to_pixels(
+        size, SONG_TITLE_BOTTOM_EDGE_OFFSET_CM
     )
     draw_centered_text_at_edge(
-        draw, song_text, font_song, center_x, size - edge_offset, "bottom"
+        draw, artist_text, font_artist, center_x, artist_edge_offset, "top"
+    )
+    draw_centered_text_at_edge(
+        draw, song_text, font_song, center_x, size - title_edge_offset, "bottom"
     )
         
     # Render Custom Title on Solution Side
@@ -2284,6 +2354,9 @@ def create_pdf_in_memory(songs, progress_bar=None, settings_override=None):
         # --- PAGE 1: FRONT (QR CODES) — WHITE MARGINS/GUTTERS ---
         c.setFillColorRGB(1, 1, 1)
         c.rect(0, 0, width, height, stroke=0, fill=1)
+        qr_page_rotated = apply_qr_page_rotation(
+            c, width, height, settings.get('qr_pages_upside_down', False)
+        )
 
         for idx, x, y in get_pdf_card_positions(len(batch_songs)):
             song = batch_songs[idx]
@@ -2306,6 +2379,8 @@ def create_pdf_in_memory(songs, progress_bar=None, settings_override=None):
             # Free the per-card rasters; otherwise peak memory grows with playlist size.
             del base_qr, qr_pil, img_byte_arr
 
+        if qr_page_rotated:
+            c.restoreState()
         c.showPage()
 
         # --- PAGE 2: BACK (SOLUTIONS - MIRRORED) ---

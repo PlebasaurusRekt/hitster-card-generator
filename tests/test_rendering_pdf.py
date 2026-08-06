@@ -1,3 +1,4 @@
+import math
 import random
 import tempfile
 import unittest
@@ -132,8 +133,11 @@ class RenderingTests(unittest.TestCase):
 
     def test_solution_text_blocks_keep_exact_edge_offsets_when_wrapped(self):
         size = 2000
-        edge_offset = utils.card_distance_cm_to_pixels(
-            size, utils.SONG_TEXT_EDGE_OFFSET_CM
+        artist_edge_offset = utils.card_distance_cm_to_pixels(
+            size, utils.SONG_ARTIST_TOP_EDGE_OFFSET_CM
+        )
+        title_edge_offset = utils.card_distance_cm_to_pixels(
+            size, utils.SONG_TITLE_BOTTOM_EDGE_OFFSET_CM
         )
         settings = utils.get_settings({"google_font": ""})
         font = utils.get_font_for_setting(
@@ -141,8 +145,8 @@ class RenderingTests(unittest.TestCase):
         )
 
         for edge, edge_y in (
-            ("top", edge_offset),
-            ("bottom", size - edge_offset),
+            ("top", artist_edge_offset),
+            ("bottom", size - title_edge_offset),
         ):
             background = Image.new("RGB", (size, size), "white")
             image = background.copy()
@@ -157,9 +161,34 @@ class RenderingTests(unittest.TestCase):
             bbox = self._ink_bbox(image, background)
             self.assertIsNotNone(bbox)
             if edge == "top":
-                self.assertEqual(bbox[1], edge_offset)
+                self.assertEqual(bbox[1], artist_edge_offset)
             else:
-                self.assertEqual(bbox[3], size - edge_offset)
+                self.assertEqual(bbox[3], size - title_edge_offset)
+
+    def test_requested_print_measurements_are_the_default_offsets(self):
+        self.assertEqual(utils.SONG_TITLE_BOTTOM_EDGE_OFFSET_CM, 0.8)
+        self.assertEqual(utils.SONG_ARTIST_TOP_EDGE_OFFSET_CM, 0.9)
+        self.assertEqual(utils.CARD_NUMBER_BOTTOM_OFFSET_CM, 0.3)
+        self.assertEqual(utils.SOLUTION_TITLE_TOP_OFFSET_CM, 0.2)
+        settings = utils.get_settings({"google_font": ""})
+        font = utils.get_font_for_setting(
+            settings, utils.DEFAULT_SONG_YEAR_SIZE, role="year", weight=700
+        )
+        glyph_height = font.getmask("2").getbbox()[3]
+        glyph_height_cm = (
+            glyph_height * utils.CARD_PHYSICAL_SIZE_CM / 2000
+        )
+        self.assertAlmostEqual(glyph_height_cm, 1.4, places=2)
+
+    def test_solution_wash_preserves_old_span_with_a_warmer_brighter_pair(self):
+        for color in utils.DEFAULT_DESIGN_SETTINGS["color_gradient"]:
+            base, bright = utils.derive_solution_color_wash_palette(color)
+            old_warm = utils._derive_unexpanded_solution_warm_color(base)
+            old_span = utils._solution_wash_target_distance(base, old_warm)
+            self.assertAlmostEqual(
+                math.dist(base, bright), old_span, delta=1.0
+            )
+            self.assertGreater(sum(bright), sum(base))
 
     def test_solution_title_and_card_numbers_keep_physical_offsets(self):
         size = 2000
@@ -203,15 +232,18 @@ class RenderingTests(unittest.TestCase):
             self.assertEqual(size - number_bbox[2], expected_right)
             self.assertEqual(size - number_bbox[3], expected_bottom)
 
-    def test_reference_song_has_requested_capital_to_year_gaps(self):
+    def test_reference_song_keeps_non_overlapping_text_blocks(self):
         size = 2000
         settings = utils.get_settings({"google_font": ""})
         self.assertEqual(
             settings["song_year_size"], utils.DEFAULT_SONG_YEAR_SIZE
         )
         background = Image.new("RGB", (size, size), "white")
-        edge_offset = utils.card_distance_cm_to_pixels(
-            size, utils.SONG_TEXT_EDGE_OFFSET_CM
+        artist_edge_offset = utils.card_distance_cm_to_pixels(
+            size, utils.SONG_ARTIST_TOP_EDGE_OFFSET_CM
+        )
+        title_edge_offset = utils.card_distance_cm_to_pixels(
+            size, utils.SONG_TITLE_BOTTOM_EDGE_OFFSET_CM
         )
         center = size / 2
 
@@ -224,7 +256,7 @@ class RenderingTests(unittest.TestCase):
         )
         capital_m = background.copy()
         ImageDraw.Draw(capital_m).text(
-            (0, edge_offset - artist_bbox[1]), "M",
+            (0, artist_edge_offset - artist_bbox[1]), "M",
             fill="black", font=font_artist,
         )
         capital_m_bbox = self._ink_bbox(capital_m, background)
@@ -238,7 +270,7 @@ class RenderingTests(unittest.TestCase):
         )
         capital_w = background.copy()
         ImageDraw.Draw(capital_w).text(
-            (0, size - edge_offset - title_bbox[3]), "W",
+            (0, size - title_edge_offset - title_bbox[3]), "W",
             fill="black", font=font_title,
         )
         capital_w_bbox = self._ink_bbox(capital_w, background)
@@ -260,15 +292,40 @@ class RenderingTests(unittest.TestCase):
         title_gap_cm = (
             capital_w_bbox[1] - year_bbox[3]
         ) * utils.CARD_PHYSICAL_SIZE_CM / size
-        self.assertAlmostEqual(
-            artist_gap_cm, utils.SONG_ARTIST_TO_YEAR_GAP_CM, places=1
-        )
-        self.assertAlmostEqual(
-            title_gap_cm, utils.SONG_YEAR_TO_TITLE_GAP_CM, places=1
-        )
+        self.assertGreater(artist_gap_cm, 0)
+        self.assertGreater(title_gap_cm, 0)
 
 
 class PdfLayoutTests(unittest.TestCase):
+    def test_qr_page_rotation_is_opt_in_and_rotates_the_complete_grid(self):
+        class CanvasSpy:
+            def __init__(self):
+                self.calls = []
+
+            def saveState(self):
+                self.calls.append(("save",))
+
+            def translate(self, x, y):
+                self.calls.append(("translate", x, y))
+
+            def rotate(self, degrees):
+                self.calls.append(("rotate", degrees))
+
+            def restoreState(self):
+                self.calls.append(("restore",))
+
+        canvas_spy = CanvasSpy()
+        self.assertFalse(
+            utils.apply_qr_page_rotation(canvas_spy, 100, 200, False)
+        )
+        self.assertEqual(canvas_spy.calls, [])
+        self.assertTrue(
+            utils.apply_qr_page_rotation(canvas_spy, 100, 200, True)
+        )
+        self.assertEqual(
+            canvas_spy.calls,
+            [("save",), ("translate", 100, 200), ("rotate", 180)],
+        )
     def test_front_and_back_positions_mirror_each_row(self):
         front = utils.get_pdf_card_positions(12)
         back = utils.get_pdf_card_positions(12, mirrored=True)

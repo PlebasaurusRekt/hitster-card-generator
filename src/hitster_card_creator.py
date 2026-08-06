@@ -129,7 +129,11 @@ def generate_hitster_cards(
 
     print("\nStep 3: Creating PDF...")
     pdf_path = os.path.join(OUTPUT_DIR, f"{output_dir}.pdf")
-    utils.create_cards_pdf(full_output_path, pdf_path)
+    utils.create_cards_pdf(
+        full_output_path,
+        pdf_path,
+        qr_pages_upside_down=settings.get('qr_pages_upside_down', False),
+    )
     print(f"\n✓ Done! PDF ready at: {pdf_path}")
     return pdf_path
 
@@ -151,6 +155,10 @@ if __name__ == "__main__":
     parser.add_argument('--bg-type', choices=['solid', 'neon_rings'], default=None)
     parser.add_argument('--game-title', default=None)
     parser.add_argument('--game-title-pos', default=None)
+    parser.add_argument(
+        '--qr-pages-upside-down', action='store_true', default=None,
+        help='Rotate every QR-side PDF page by 180 degrees.',
+    )
     args = parser.parse_args()
 
     PLAYLIST_URL = os.getenv("PLAYLIST_URL", "")
@@ -168,6 +176,9 @@ if __name__ == "__main__":
     BG_TYPE = os.getenv("BG_TYPE", "neon_rings")
     GAME_TITLE = os.getenv("GAME_TITLE", "")
     GAME_TITLE_POS = os.getenv("GAME_TITLE_POS", "top")
+    QR_PAGES_UPSIDE_DOWN = (
+        os.getenv("QR_PAGES_UPSIDE_DOWN", "False").lower() == "true"
+    )
 
     ink_save_mode = args.ink_save_mode if args.ink_save_mode is not None else INK_SAVING_MODE
     card_draw_border = args.card_draw_border if args.card_draw_border is not None else CARD_DRAW_BORDER
@@ -193,6 +204,11 @@ if __name__ == "__main__":
     db['qr_title'] = args.game_title if args.game_title is not None else GAME_TITLE
     db['qr_title_pos'] = args.game_title_pos if args.game_title_pos is not None else GAME_TITLE_POS
     db['qr_title_enabled'] = bool(db['qr_title'])
+    db['qr_pages_upside_down'] = (
+        args.qr_pages_upside_down
+        if args.qr_pages_upside_down is not None
+        else QR_PAGES_UPSIDE_DOWN
+    )
 
     print(f"Playlist URL: {PLAYLIST_URL or '(using links.txt/cache)'}")
     print(f"Ink saving mode: {db['ink_saving_mode']}, Draw border: {db['card_draw_border']}, Label: {db['card_label']}\n")

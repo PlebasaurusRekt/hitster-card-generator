@@ -7,7 +7,7 @@ import pandas as pd
 import src.input_validation as input_validation
 import src.utils as utils
 
-EXPECTED_UTILS_API_VERSION = 3
+EXPECTED_UTILS_API_VERSION = 4
 if getattr(utils, 'UTILS_API_VERSION', 0) < EXPECTED_UTILS_API_VERSION:
     utils = importlib.reload(utils)
 
@@ -216,6 +216,14 @@ with st.sidebar:
                             help="Use white background and black text to save ink.")
         border_mode = st.toggle("Draw Cutting Borders", value=st.session_state.get('border_mode', False),
                                help="Draw a line around each card for easier cutting.")
+        qr_pages_upside_down = st.toggle(
+            "Rotate QR Pages 180° (Upside Down)",
+            value=st.session_state.get('qr_pages_upside_down', False),
+            help=(
+                "Rotates the complete QR-side PDF page, including the card "
+                "grid, QR codes, labels, and card numbers."
+            ),
+        )
         card_number_start = st.number_input(
             "Starting Card Number", min_value=1, value=1, step=1,
             help="Cards are numbered automatically from this value."
@@ -438,6 +446,7 @@ with st.sidebar:
         
         st.session_state.ink_mode = ink_mode
         st.session_state.border_mode = border_mode
+        st.session_state.qr_pages_upside_down = qr_pages_upside_down
         st.session_state.google_font = google_font
 
     with tabs[1]:
@@ -516,14 +525,17 @@ with st.sidebar:
         sol_color_wash_enabled = st.toggle(
             "Enable Soft Color Wash",
             value=True,
-            help="Uses each card's year-gradient color with randomized warm and cool fields."
+            help=(
+                "Uses each card's year-gradient color with a randomized "
+                "brighter, warmer field."
+            ),
         )
         sol_bg_type = "gradient"
         if sol_color_wash_enabled:
             st.caption(
-                "The base comes from the Year Color Gradient. Color separation, "
-                "brightness, darkness, opacity, and edge influence vary independently "
-                "per card with strong warm-to-cool variation across the surface."
+                "The base comes from the Year Color Gradient. Each card blends "
+                "from that base into a brighter, warmer field with a strong "
+                "colour offset and per-card variation."
             )
         else:
             sol_bg_type = st.selectbox(
@@ -572,6 +584,7 @@ with st.sidebar:
     st.session_state.design_settings = {
         "ink_saving_mode": ink_mode,
         "card_draw_border": border_mode,
+        "qr_pages_upside_down": qr_pages_upside_down,
         "card_number_start": int(card_number_start),
         "card_label": card_label,
         "google_font": google_font,
