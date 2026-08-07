@@ -15,7 +15,8 @@ The app creates 6.5 × 6.5 cm cards on A4 sheets (3 × 4 per page), with QR-code
 - Customize backgrounds, QR colors, neon rings, fonts, titles, labels, numbering, and ink-saving borders.
 - Generate a mirrored, duplex-ready PDF.
 - Use a four-module QR quiet zone with integer-aligned QR modules.
-- Upload custom images up to 10 MB; 2000 × 2000 pixels is recommended.
+- Upload custom PNG or JPEG background images up to 10 MB; 2000 × 2000 pixels is recommended.
+- Use PNG, JPEG, or SVG artwork for card set titles; SVG title artwork preserves its aspect ratio in previews and PDFs.
 
 ## Web app
 

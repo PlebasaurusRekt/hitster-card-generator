@@ -36,9 +36,10 @@ from src.http_client import (
 )
 from src.input_validation import (
     MAX_TRACK_LINKS, InputValidationError, canonicalize_spotify_url,
+    rasterize_svg_image,
 )
 
-UTILS_API_VERSION = 4
+UTILS_API_VERSION = 5
 CARD_PHYSICAL_SIZE_CM = 6.5
 DEFAULT_QR_CODE_SIZE_CM = 2.5
 DEFAULT_QR_BORDER_CM = 0.1
@@ -185,6 +186,7 @@ DEFAULT_DESIGN_SETTINGS = {
     "qr_title_size": 80,
     "qr_title_color": (255, 255, 255),
     "qr_title_bg": False,
+    "qr_title_image": None,
     "qr_card_number_opacity": 42,
     "qr_pages_upside_down": False,
 
@@ -210,6 +212,7 @@ DEFAULT_DESIGN_SETTINGS = {
     "sol_title_color": (255, 255, 255),
     "sol_title_opacity": 60,
     "sol_title_bg": False,
+    "sol_title_image": None,
 }
 
 def get_settings(override=None):
@@ -255,11 +258,16 @@ def build_generation_fingerprint(records, settings):
     """Return a stable digest for every input that affects a generated PDF."""
     def normalize(value):
         if isinstance(value, Image.Image):
-            return {
+            image_data = {
                 'image_mode': value.mode,
                 'image_size': value.size,
                 'image_sha256': hashlib.sha256(value.tobytes()).hexdigest(),
             }
+            if value.info.get('svg_bytes'):
+                image_data['svg_sha256'] = hashlib.sha256(
+                    value.info['svg_bytes']
+                ).hexdigest()
+            return image_data
         if isinstance(value, dict):
             return {
                 str(key): normalize(item)
@@ -1871,11 +1879,17 @@ def render_qr_code(img, qr_code, settings):
 def render_game_title(img, settings, side="qr", qr_code=None):
     """Render the game title / card label."""
     prefix = "qr" if side == "qr" else "sol"
-    
-    if not settings.get(f'{prefix}_title_enabled') or not settings.get(f'{prefix}_title'):
+    title_image = settings.get(f'{prefix}_title_image')
+    title = settings.get(f'{prefix}_title')
+    if not settings.get(f'{prefix}_title_enabled') or not (
+        title or isinstance(title_image, Image.Image)
+    ):
         return
-        
-    title = settings[f'{prefix}_title']
+
+    if isinstance(title_image, Image.Image):
+        render_title_image(img, title_image, settings, side, qr_code)
+        return
+
     default_pos = 'top' if side == 'qr' else 'in_border_top_left'
     pos = settings.get(f'{prefix}_title_pos', default_pos)
     default_font_size = 80 if side == 'qr' else 140
@@ -1976,6 +1990,94 @@ def render_game_title(img, settings, side="qr", qr_code=None):
         font=font, anchor=anchor
     )
     img.paste(text_overlay, (0, 0), text_overlay)
+
+
+def render_title_image(img, title_image, settings, side="qr", qr_code=None):
+    """Render title artwork at the same physical size as a title font setting."""
+    if title_image.width <= 0 or title_image.height <= 0:
+        return
+
+    prefix = "qr" if side == "qr" else "sol"
+    default_pos = 'top' if side == 'qr' else 'in_border_top_left'
+    pos = settings.get(f'{prefix}_title_pos', default_pos)
+    default_size = 80 if side == 'qr' else 140
+    height = max(1, round(settings.get(f'{prefix}_title_size', default_size)))
+    width = max(1, round(title_image.width * height / title_image.height))
+    opacity = max(0, min(
+        100, settings.get(f'{prefix}_title_opacity', 100 if side == 'qr' else 60)
+    ))
+    bg_enabled = settings.get(f'{prefix}_title_bg', False)
+    bg_color = settings.get('qr_bg_color', (0, 0, 0)) if side == 'qr' else (255, 255, 255)
+
+    size = settings['card_size']
+    margin = round(size * 0.05)
+    center = size // 2
+    qr_size = (
+        get_qr_render_geometry(qr_code, settings)[2]
+        if side == 'qr' and qr_code is not None
+        else get_qr_code_size_pixels(settings)
+    )
+    qr_bound = (
+        center + qr_size // 2 + get_qr_backplate_padding_pixels(settings)
+    )
+    border_width = settings.get('sol_border_width', 142) // 2
+
+    if side == "sol":
+        left = card_distance_cm_to_pixels(size, SOLUTION_TITLE_LEFT_OFFSET_CM)
+        top = card_distance_cm_to_pixels(size, SOLUTION_TITLE_TOP_OFFSET_CM)
+    else:
+        positions = {
+            "top": ((size - width) // 2, margin),
+            "bottom": ((size - width) // 2, size - margin - height),
+            "top_left": (margin, margin),
+            "top_right": (size - margin - width, margin),
+            "bottom_left": (margin, size - margin - height),
+            "bottom_right": (size - margin - width, size - margin - height),
+            "center_above_qr": (
+                (size - width) // 2, size - qr_bound - margin - height,
+            ),
+            "center_below_qr": ((size - width) // 2, qr_bound + margin),
+            "in_border_bottom_right": (
+                size - border_width - width, size - border_width - height,
+            ),
+            "in_border_bottom_left": (border_width, size - border_width - height),
+            "in_border_top_right": (size - border_width - width, border_width),
+            "in_border_top_left": (border_width, border_width),
+        }
+        if pos not in positions:
+            return
+        left, top = positions[pos]
+
+    right = left + width
+    bottom = top + height
+    if bg_enabled:
+        background_padding = max(1, round(size * 0.0075))
+        ImageDraw.Draw(img).rectangle(
+            [
+                left - background_padding, top - background_padding,
+                right + background_padding, bottom + background_padding,
+            ],
+            fill=bg_color,
+        )
+
+    svg_bytes = title_image.info.get('svg_bytes')
+    if svg_bytes:
+        try:
+            artwork = rasterize_svg_image(svg_bytes, width, height)
+        except InputValidationError:
+            artwork = title_image.convert("RGBA").resize(
+                (width, height), Image.Resampling.LANCZOS
+            )
+    else:
+        artwork = title_image.convert("RGBA").resize(
+            (width, height), Image.Resampling.LANCZOS
+        )
+    if opacity < 100:
+        alpha = artwork.getchannel("A").point(
+            lambda value: round(value * opacity / 100)
+        )
+        artwork.putalpha(alpha)
+    img.paste(artwork, (left, top), artwork)
 
 
 def render_card_number(img, card_number, settings, side="qr"):

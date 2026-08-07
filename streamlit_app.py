@@ -7,7 +7,7 @@ import pandas as pd
 import src.input_validation as input_validation
 import src.utils as utils
 
-EXPECTED_UTILS_API_VERSION = 4
+EXPECTED_UTILS_API_VERSION = 5
 if getattr(utils, 'UTILS_API_VERSION', 0) < EXPECTED_UTILS_API_VERSION:
     utils = importlib.reload(utils)
 
@@ -505,9 +505,24 @@ with st.sidebar:
         st.session_state.qr_title_en = st.toggle("Enable Title", key="qr_t_en")
         if st.session_state.qr_title_en:
             st.session_state.qr_title = st.text_input("Title Text", value="HITSTER", key="qr_t_t")
+            qr_title_upload = st.file_uploader(
+                "Title Artwork (replaces title text)",
+                type=["png", "jpg", "jpeg", "svg"], key="qr_title_up",
+                help="SVG artwork keeps its aspect ratio at preview and print resolution.",
+            )
+            if qr_title_upload:
+                try:
+                    st.session_state.qr_title_img = (
+                        input_validation.load_uploaded_image(qr_title_upload)
+                    )
+                except input_validation.InputValidationError as exc:
+                    st.session_state.qr_title_img = None
+                    st.error(str(exc))
+            else:
+                st.session_state.qr_title_img = None
             pos_options = ["top", "bottom", "top_left", "top_right", "bottom_left", "bottom_right", "center_above_qr", "center_below_qr"]
             st.session_state.qr_title_pos = st.selectbox("Position", pos_options, key="qr_t_p")
-            st.session_state.qr_title_size = st.slider("Card Set Title Font Size", 20, 200, 80, key="qr_t_s")
+            st.session_state.qr_title_size = st.slider("Card Set Title Size", 20, 200, 80, key="qr_t_s")
             st.session_state.qr_title_color = st.color_picker("Title Color", value="#FFFFFF", key="qr_t_c")
             st.session_state.qr_title_bg = st.toggle("Draw Background Box", key="qr_t_bg")
 
@@ -574,7 +589,22 @@ with st.sidebar:
         st.session_state.sol_title_en = st.toggle("Enable Title", key="sol_t_en")
         if st.session_state.sol_title_en:
             st.session_state.sol_title = st.text_input("Title Text", value="HITSTER", key="sol_t_t")
-            st.session_state.sol_title_size = st.slider("Card Set Title Font Size", 20, 200, 140, key="sol_t_s")
+            sol_title_upload = st.file_uploader(
+                "Title Artwork (replaces title text)",
+                type=["png", "jpg", "jpeg", "svg"], key="sol_title_up",
+                help="SVG artwork keeps its aspect ratio at preview and print resolution.",
+            )
+            if sol_title_upload:
+                try:
+                    st.session_state.sol_title_img = (
+                        input_validation.load_uploaded_image(sol_title_upload)
+                    )
+                except input_validation.InputValidationError as exc:
+                    st.session_state.sol_title_img = None
+                    st.error(str(exc))
+            else:
+                st.session_state.sol_title_img = None
+            st.session_state.sol_title_size = st.slider("Card Set Title Size", 20, 200, 140, key="sol_t_s")
             st.session_state.sol_title_color = st.color_picker("Title Color", value="#FFFFFF", key="sol_t_c")
             st.session_state.sol_title_opacity = st.slider("Title Opacity (%)", 0, 100, 60, key="sol_t_opacity")
             st.session_state.sol_title_bg = st.toggle("Draw Background Box", key="sol_t_bg")
@@ -619,6 +649,7 @@ with st.sidebar:
         "qr_title_size": st.session_state.get('qr_t_s', 80),
         "qr_title_color": st.session_state.get('qr_title_color', "#FFFFFF"),
         "qr_title_bg": st.session_state.get('qr_t_bg', False),
+        "qr_title_image": st.session_state.get('qr_title_img'),
         
         "sol_bg_type": sol_bg_type,
         "sol_bg_image": st.session_state.get('sol_bg_img'),
@@ -639,6 +670,7 @@ with st.sidebar:
         "sol_title_color": st.session_state.get('sol_title_color', "#FFFFFF"),
         "sol_title_opacity": st.session_state.get('sol_t_opacity', 60),
         "sol_title_bg": st.session_state.get('sol_t_bg', False),
+        "sol_title_image": st.session_state.get('sol_title_img'),
     }
 with st.expander("Disclaimer, Accuracy & Support"):
     st.info("""

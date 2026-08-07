@@ -99,6 +99,83 @@ class RenderingTests(unittest.TestCase):
         self.assertEqual(settings["qr_title"], "Game Night")
         self.assertEqual(settings["sol_title"], "Game Night")
 
+    def test_title_artwork_preserves_aspect_ratio_at_preview_and_pdf_sizes(self):
+        size = 2000
+        title_artwork = Image.new("RGBA", (2000, 500), "white")
+        title_artwork.info["svg_bytes"] = b"validated SVG source"
+        settings = utils.get_settings({
+            "card_size": size,
+            "qr_title_enabled": True,
+            "qr_title": "This text must be replaced by the title artwork",
+            "qr_title_image": title_artwork,
+            "qr_title_pos": "top",
+            "qr_title_size": 100,
+        })
+
+        preview = Image.new("RGB", (size, size), "black")
+        with patch(
+            "src.utils.rasterize_svg_image",
+            side_effect=lambda raw, width, height: Image.new(
+                "RGBA", (width, height), "white"
+            ),
+        ) as rasterize:
+            utils.render_game_title(preview, settings, side="qr")
+        self.assertEqual(self._ink_bbox(preview, Image.new("RGB", preview.size, "black")),
+                         (800, 100, 1200, 200))
+        rasterize.assert_called_once_with(title_artwork.info["svg_bytes"], 400, 100)
+
+        pdf_settings = utils.get_pdf_render_settings(settings)
+        pdf = Image.new(
+            "RGB", (utils.PDF_RENDER_CARD_SIZE, utils.PDF_RENDER_CARD_SIZE), "black"
+        )
+        with patch(
+            "src.utils.rasterize_svg_image",
+            side_effect=lambda raw, width, height: Image.new(
+                "RGBA", (width, height), "white"
+            ),
+        ) as rasterize:
+            utils.render_game_title(pdf, pdf_settings, side="qr")
+        pdf_bbox = self._ink_bbox(pdf, Image.new("RGB", pdf.size, "black"))
+        self.assertEqual(pdf_bbox[2] - pdf_bbox[0], pdf_settings["qr_title_size"] * 4)
+        self.assertEqual(pdf_bbox[3] - pdf_bbox[1], pdf_settings["qr_title_size"])
+        rasterize.assert_called_once_with(
+            title_artwork.info["svg_bytes"],
+            pdf_settings["qr_title_size"] * 4,
+            pdf_settings["qr_title_size"],
+        )
+
+    def test_solution_title_artwork_uses_the_configured_physical_offsets(self):
+        size = 2000
+        settings = utils.get_settings({
+            "card_size": size,
+            "sol_title_enabled": True,
+            "sol_title_image": Image.new("RGBA", (400, 100), "white"),
+            "sol_title_size": 100,
+            "sol_title_opacity": 100,
+        })
+        background = Image.new("RGB", (size, size), "black")
+        image = background.copy()
+
+        utils.render_game_title(image, settings, side="sol")
+
+        self.assertEqual(
+            self._ink_bbox(image, background),
+            (
+                utils.card_distance_cm_to_pixels(
+                    size, utils.SOLUTION_TITLE_LEFT_OFFSET_CM
+                ),
+                utils.card_distance_cm_to_pixels(
+                    size, utils.SOLUTION_TITLE_TOP_OFFSET_CM
+                ),
+                utils.card_distance_cm_to_pixels(
+                    size, utils.SOLUTION_TITLE_LEFT_OFFSET_CM
+                ) + 400,
+                utils.card_distance_cm_to_pixels(
+                    size, utils.SOLUTION_TITLE_TOP_OFFSET_CM
+                ) + 100,
+            ),
+        )
+
     def test_generation_fingerprint_tracks_rows_settings_and_images(self):
         image_a = Image.new("RGB", (2, 2), "red")
         image_b = Image.new("RGB", (2, 2), "blue")
@@ -326,6 +403,7 @@ class PdfLayoutTests(unittest.TestCase):
             canvas_spy.calls,
             [("save",), ("translate", 100, 200), ("rotate", 180)],
         )
+
     def test_front_and_back_positions_mirror_each_row(self):
         front = utils.get_pdf_card_positions(12)
         back = utils.get_pdf_card_positions(12, mirrored=True)

@@ -1,5 +1,6 @@
 import io
 import unittest
+from unittest.mock import patch
 
 from PIL import Image
 
@@ -102,6 +103,26 @@ class UploadValidationTests(unittest.TestCase):
         image = load_uploaded_image(self.image_upload())
         self.assertEqual(image.size, (20, 20))
         image.getpixel((0, 0))
+
+    def test_rasterizes_svg_at_a_bounded_size_with_its_viewbox_ratio(self):
+        svg = b'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 1">
+            <rect width="4" height="1" fill="#00ff00" />
+        </svg>'''
+        with patch(
+            "src.input_validation.rasterize_svg_image",
+            return_value=Image.new("RGBA", (2000, 500), "#00ff00"),
+        ) as rasterize:
+            image = load_uploaded_image(Upload(svg))
+
+        self.assertEqual(image.size, (2000, 500))
+        self.assertEqual(image.mode, "RGBA")
+        self.assertEqual(image.getpixel((1000, 250)), (0, 255, 0, 255))
+        self.assertEqual(image.info["svg_bytes"], svg)
+        rasterize.assert_called_once_with(svg, 2000, 500)
+
+    def test_rejects_svg_without_a_viewport(self):
+        with self.assertRaisesRegex(InputValidationError, "width and height"):
+            load_uploaded_image(Upload(b"<svg xmlns='http://www.w3.org/2000/svg' />"))
 
     def test_rejects_large_bytes_and_extreme_aspect_ratio(self):
         with self.assertRaises(InputValidationError):
