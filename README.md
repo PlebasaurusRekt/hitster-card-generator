@@ -4,7 +4,7 @@ Generate printable, duplex-ready Hitster-style cards from Spotify tracks and pla
 
 [Open the live Streamlit app](https://hitster-card-generator2.streamlit.app/)
 
-The app creates 6.5 × 6.5 cm cards on A4 sheets (3 × 4 per page), with QR-code fronts and year-based solution backs. Preview cards stay at 2000 × 2000 pixels; PDF cards are rendered at 720 DPI.
+The app creates 6.5 × 6.5 cm cards on A4 sheets (3 × 4 per page), with QR-code fronts and year-based solution backs. It also provides a Photoshop A4-fit profile for printers where **Scale to Fit Media** reduces A4 to 97.27%. Preview cards stay at 2000 × 2000 pixels; PDF cards are rendered at 720 DPI.
 
 ## Features
 
@@ -97,6 +97,7 @@ the token exchange.
 | QR module color | `--qr-module-color` | `QR_MODULE_COLOR=#FFFFFF` | `#FFFFFF` |
 | Background type | `--bg-type` | `BG_TYPE=neon_rings` | `neon_rings` |
 | Game title | `--game-title` | `GAME_TITLE=MyGame` | *(none)* |
+| PDF print profile | `--pdf-print-profile photoshop_a4_fit` | `PDF_PRINT_PROFILE=photoshop_a4_fit` | `a4` |
 
 The CLI caches editable metadata in `output/hitster_cards/songs.json`. Use `--fetch` to refresh it. Generated card images from older runs are cleared before rebuilding so stale cards cannot enter the PDF.
 
@@ -107,9 +108,11 @@ The CLI caches editable metadata in `output/hitster_cards/songs.json`. Use `--fe
 | `output/hitster_cards/card_NNN_qr.png` | QR side |
 | `output/hitster_cards/card_NNN_solution.png` | Solution side |
 | `output/hitster_cards/songs.json` | Editable song metadata |
-| `output/hitster_cards.pdf` | Duplex-ready A4 PDF |
+| `output/hitster_cards.pdf` | Duplex-ready PDF using the selected print profile |
 
 Print at **Actual size**, double-sided, flipping on the long edge.
+
+If Photoshop is set to A4 and **Scale to Fit Media** reports 97.27%, choose **Photoshop A4 fit (97.27%)** in the app (or `photoshop_a4_fit` in the CLI). It preserves the 6.5 cm cards and internal gaps while using a 20.427 × 28.889 cm PDF canvas, so Photoshop prints it at 100% with that option enabled.
 
 ## Troubleshooting
 

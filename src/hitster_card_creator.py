@@ -133,6 +133,9 @@ def generate_hitster_cards(
         full_output_path,
         pdf_path,
         qr_pages_upside_down=settings.get('qr_pages_upside_down', False),
+        pdf_print_profile=settings.get(
+            'pdf_print_profile', utils.DEFAULT_PDF_PRINT_PROFILE
+        ),
     )
     print(f"\n✓ Done! PDF ready at: {pdf_path}")
     return pdf_path
@@ -152,6 +155,15 @@ if __name__ == "__main__":
     parser.add_argument('--qr-bg-color', default=None)
     parser.add_argument('--qr-module-color', default=None)
     parser.add_argument('--qr-size-ratio', type=float, default=None)
+    parser.add_argument(
+        '--pdf-print-profile',
+        choices=[
+            utils.PDF_PRINT_PROFILE_A4,
+            utils.PDF_PRINT_PROFILE_PHOTOSHOP_A4_FIT,
+        ],
+        default=None,
+        help='PDF page profile (default: a4).',
+    )
     parser.add_argument('--bg-type', choices=['solid', 'neon_rings'], default=None)
     parser.add_argument('--game-title', default=None)
     parser.add_argument('--game-title-pos', default=None)
@@ -167,6 +179,9 @@ if __name__ == "__main__":
     CARD_LABEL = os.getenv("CARD_LABEL", None)
     CARD_START_NUMBER = int(os.getenv("CARD_START_NUMBER", "1"))
     
+    PDF_PRINT_PROFILE = os.getenv(
+        "PDF_PRINT_PROFILE", utils.DEFAULT_PDF_PRINT_PROFILE
+    )
     QR_BG_MODE = os.getenv("QR_BG_MODE", "solid")
     QR_BG_COLOR = os.getenv("QR_BG_COLOR", "#000000")
     QR_MODULE_COLOR = os.getenv("QR_MODULE_COLOR", "#FFFFFF")
@@ -194,6 +209,11 @@ if __name__ == "__main__":
     db['card_background_color'] = 'white' if ink_save_mode else 'black'
     db['card_border_color'] = 'black' if ink_save_mode else 'white'
     db['card_label'] = card_label
+    db['pdf_print_profile'] = (
+        args.pdf_print_profile
+        if args.pdf_print_profile is not None
+        else PDF_PRINT_PROFILE
+    )
     db['card_number_start'] = card_number_start
     
     db['qr_background_mode'] = args.qr_bg_mode if args.qr_bg_mode is not None else QR_BG_MODE

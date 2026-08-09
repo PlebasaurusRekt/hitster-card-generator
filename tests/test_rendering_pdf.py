@@ -99,6 +99,10 @@ class RenderingTests(unittest.TestCase):
         self.assertEqual(settings["qr_title"], "Game Night")
         self.assertEqual(settings["sol_title"], "Game Night")
 
+    def test_solution_title_size_defaults_to_188(self):
+        settings = utils.get_settings()
+        self.assertEqual(settings["sol_title_size"], 188)
+
     def test_title_artwork_preserves_aspect_ratio_at_preview_and_pdf_sizes(self):
         size = 2000
         title_artwork = Image.new("RGBA", (2000, 500), "white")
@@ -374,6 +378,40 @@ class RenderingTests(unittest.TestCase):
 
 
 class PdfLayoutTests(unittest.TestCase):
+    def test_grid_has_equal_opposite_outer_white_borders(self):
+        card_size, margin_x, margin_y, gap_x, gap_y = (
+            utils.get_pdf_grid_layout(*utils.A4)
+        )
+        left = margin_x
+        right = utils.A4[0] - (
+            margin_x + utils.PDF_GRID_COLS * card_size
+            + (utils.PDF_GRID_COLS - 1) * gap_x
+        )
+        bottom = margin_y
+        top = utils.A4[1] - (
+            margin_y + utils.PDF_GRID_ROWS * card_size
+            + (utils.PDF_GRID_ROWS - 1) * gap_y
+        )
+
+        self.assertAlmostEqual(left, right)
+        self.assertAlmostEqual(top, bottom)
+
+    def test_photoshop_a4_fit_profile_preserves_card_spacing(self):
+        photoshop_page_size = utils.get_pdf_page_size(
+            utils.PDF_PRINT_PROFILE_PHOTOSHOP_A4_FIT
+        )
+        self.assertAlmostEqual(
+            photoshop_page_size[0],
+            utils.A4[0] * utils.PHOTOSHOP_A4_FIT_SCALE,
+        )
+        self.assertAlmostEqual(
+            photoshop_page_size[1],
+            utils.A4[1] * utils.PHOTOSHOP_A4_FIT_SCALE,
+        )
+        standard_layout = utils.get_pdf_grid_layout(*utils.A4)
+        photoshop_layout = utils.get_pdf_grid_layout(*photoshop_page_size)
+
+        self.assertAlmostEqual(standard_layout[0], photoshop_layout[0])
     def test_qr_page_rotation_is_opt_in_and_rotates_the_complete_grid(self):
         class CanvasSpy:
             def __init__(self):

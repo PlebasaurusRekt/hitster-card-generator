@@ -212,6 +212,24 @@ with st.sidebar:
     
     with tabs[0]:
         st.subheader("📄 Print & Layout")
+        pdf_print_profile = st.selectbox(
+            "PDF Print Profile",
+            options=[
+                utils.PDF_PRINT_PROFILE_A4,
+                utils.PDF_PRINT_PROFILE_PHOTOSHOP_A4_FIT,
+            ],
+            format_func=lambda profile: (
+                "Standard A4"
+                if profile == utils.PDF_PRINT_PROFILE_A4
+                else "Photoshop A4 fit (97.27%)"
+            ),
+            help=(
+                "Use Photoshop A4 fit when Photoshop is set to A4 and "
+                "Scale to Fit Media reports 97.27%. It preserves the 6.5 cm "
+                "cards and the gaps between them, while changing only the "
+                "outer white borders."
+            ),
+        )
         ink_mode = st.toggle("Ink Saving Mode", value=st.session_state.get('ink_mode', False), 
                             help="Use white background and black text to save ink.")
         border_mode = st.toggle("Draw Cutting Borders", value=st.session_state.get('border_mode', False),
@@ -604,7 +622,7 @@ with st.sidebar:
                     st.error(str(exc))
             else:
                 st.session_state.sol_title_img = None
-            st.session_state.sol_title_size = st.slider("Card Set Title Size", 20, 200, 140, key="sol_t_s")
+            st.session_state.sol_title_size = st.slider("Card Set Title Size", 20, 200, 188, key="sol_t_s")
             st.session_state.sol_title_color = st.color_picker("Title Color", value="#FFFFFF", key="sol_t_c")
             st.session_state.sol_title_opacity = st.slider("Title Opacity (%)", 0, 100, 60, key="sol_t_opacity")
             st.session_state.sol_title_bg = st.toggle("Draw Background Box", key="sol_t_bg")
@@ -613,6 +631,7 @@ with st.sidebar:
     # passed explicitly into utils functions, never written to a shared global.
     st.session_state.design_settings = {
         "ink_saving_mode": ink_mode,
+        "pdf_print_profile": pdf_print_profile,
         "card_draw_border": border_mode,
         "qr_pages_upside_down": qr_pages_upside_down,
         "card_number_start": int(card_number_start),
@@ -666,7 +685,7 @@ with st.sidebar:
         "card_number_size": st.session_state.get('card_number_font_size', 70),
         "sol_title_enabled": st.session_state.get('sol_t_en', False),
         "sol_title": st.session_state.get('sol_t_t', ""),
-        "sol_title_size": st.session_state.get('sol_t_s', 140),
+        "sol_title_size": st.session_state.get('sol_t_s', 188),
         "sol_title_color": st.session_state.get('sol_title_color', "#FFFFFF"),
         "sol_title_opacity": st.session_state.get('sol_t_opacity', 60),
         "sol_title_bg": st.session_state.get('sol_t_bg', False),

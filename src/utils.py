@@ -137,6 +137,7 @@ def hex2color(color):
 # =============================================================================
 DEFAULT_DESIGN_SETTINGS = {
     "card_size": 2000,
+    "pdf_print_profile": "a4",
     "ink_saving_mode": False,
     "card_draw_border": False,
     "card_border_color": (255, 255, 255),
@@ -208,7 +209,7 @@ DEFAULT_DESIGN_SETTINGS = {
     "sol_title": "",
     "sol_title_enabled": False,
     "sol_title_pos": "in_border_top_left",
-    "sol_title_size": 140,
+    "sol_title_size": 188,
     "sol_title_color": (255, 255, 255),
     "sol_title_opacity": 60,
     "sol_title_bg": False,
@@ -1323,6 +1324,15 @@ PDF_GRID_COLS = 3
 PDF_GRID_ROWS = 4
 PDF_CARDS_PER_PAGE = PDF_GRID_COLS * PDF_GRID_ROWS
 PDF_INNER_GUTTER_SCALE = 0.25
+PDF_PRINT_PROFILE_A4 = "a4"
+PDF_PRINT_PROFILE_PHOTOSHOP_A4_FIT = "photoshop_a4_fit"
+DEFAULT_PDF_PRINT_PROFILE = PDF_PRINT_PROFILE_A4
+# Photoshop reports this scale when its A4 "Scale to Fit Media" option is
+# constrained by the printable area of the target printer.
+PHOTOSHOP_A4_FIT_SCALE = 0.9727
+PDF_PHOTOSHOP_A4_FIT_PAGE_SIZE = tuple(
+    dimension * PHOTOSHOP_A4_FIT_SCALE for dimension in A4
+)
 PDF_RENDER_DPI = 720
 PDF_RENDER_CARD_SIZE = round(PDF_RENDER_DPI * PDF_CARD_SIZE / 72)
 PDF_SCALED_PIXEL_SETTINGS = (
@@ -1332,14 +1342,23 @@ PDF_SCALED_PIXEL_SETTINGS = (
     'sol_title_size',
 )
 
+def get_pdf_page_size(print_profile=DEFAULT_PDF_PRINT_PROFILE):
+    """Return the PDF page size for the selected physical print profile."""
+    if print_profile == PDF_PRINT_PROFILE_A4:
+        return A4
+    if print_profile == PDF_PRINT_PROFILE_PHOTOSHOP_A4_FIT:
+        return PDF_PHOTOSHOP_A4_FIT_PAGE_SIZE
+    raise ValueError(
+        f"Unsupported PDF print profile: {print_profile!r}."
+    )
 
 def get_pdf_grid_layout(page_width, page_height):
-    """Return a centered A4 grid with quarter-size gaps between cards."""
+    """Return a centered grid with fixed card spacing and outer borders."""
     previous_gap_x = (
-        page_width - PDF_GRID_COLS * PDF_CARD_SIZE
+        A4[0] - PDF_GRID_COLS * PDF_CARD_SIZE
     ) / (PDF_GRID_COLS + 1)
     previous_gap_y = (
-        page_height - PDF_GRID_ROWS * PDF_CARD_SIZE
+        A4[1] - PDF_GRID_ROWS * PDF_CARD_SIZE
     ) / (PDF_GRID_ROWS + 1)
     gap_x = previous_gap_x * PDF_INNER_GUTTER_SCALE
     gap_y = previous_gap_y * PDF_INNER_GUTTER_SCALE
@@ -1354,14 +1373,15 @@ def get_pdf_grid_layout(page_width, page_height):
     return PDF_CARD_SIZE, margin_x, margin_y, gap_x, gap_y
 
 
-def get_pdf_card_positions(card_count, mirrored=False):
+def get_pdf_card_positions(card_count, mirrored=False, page_size=A4):
     """Return shared front/back positions for one PDF card batch."""
     if not 0 <= card_count <= PDF_CARDS_PER_PAGE:
         raise ValueError(
             f"PDF batches must contain 0-{PDF_CARDS_PER_PAGE} cards."
         )
+    page_width, page_height = page_size
     card_size, margin_x, margin_y, gap_x, gap_y = (
-        get_pdf_grid_layout(*A4)
+        get_pdf_grid_layout(page_width, page_height)
     )
     positions = []
     for index in range(card_count):
@@ -1371,7 +1391,7 @@ def get_pdf_card_positions(card_count, mirrored=False):
             column = PDF_GRID_COLS - 1 - column
         x = margin_x + column * (card_size + gap_x)
         y = (
-            A4[1] - margin_y - (row + 1) * card_size
+            page_height - margin_y - (row + 1) * card_size
             - row * gap_y
         )
         positions.append((index, x, y))
@@ -1427,7 +1447,8 @@ def apply_qr_page_rotation(pdf_canvas, page_width, page_height, enabled):
 
 
 def create_cards_pdf(
-    cards_folder, output_pdf_path, qr_pages_upside_down=False
+    cards_folder, output_pdf_path, qr_pages_upside_down=False,
+    pdf_print_profile=DEFAULT_PDF_PRINT_PROFILE,
 ):
     """Create a duplex PDF from matched disk-rendered card pairs."""
     file_pattern = re.compile(
@@ -1455,8 +1476,9 @@ def create_cards_pdf(
     if not card_numbers:
         raise ValueError("No card image pairs were found.")
 
-    pdf_canvas = canvas.Canvas(output_pdf_path, pagesize=A4)
-    page_width, page_height = A4
+    page_size = get_pdf_page_size(pdf_print_profile)
+    pdf_canvas = canvas.Canvas(output_pdf_path, pagesize=page_size)
+    page_width, page_height = page_size
     card_size = PDF_CARD_SIZE
     total_pages = (
         len(card_numbers) + PDF_CARDS_PER_PAGE - 1
@@ -1475,7 +1497,9 @@ def create_cards_pdf(
         qr_page_rotated = apply_qr_page_rotation(
             pdf_canvas, page_width, page_height, qr_pages_upside_down
         )
-        for index, x, y in get_pdf_card_positions(len(batch_numbers)):
+        for index, x, y in get_pdf_card_positions(
+            len(batch_numbers), page_size=page_size
+        ):
             card_number = batch_numbers[index]
             qr_path = os.path.join(
                 cards_folder, qr_images[card_number]
@@ -1492,7 +1516,7 @@ def create_cards_pdf(
             0, 0, page_width, page_height, stroke=0, fill=1
         )
         for index, x, y in get_pdf_card_positions(
-            len(batch_numbers), mirrored=True
+            len(batch_numbers), mirrored=True, page_size=page_size
         ):
             card_number = batch_numbers[index]
             solution_path = os.path.join(
@@ -1892,7 +1916,7 @@ def render_game_title(img, settings, side="qr", qr_code=None):
 
     default_pos = 'top' if side == 'qr' else 'in_border_top_left'
     pos = settings.get(f'{prefix}_title_pos', default_pos)
-    default_font_size = 80 if side == 'qr' else 140
+    default_font_size = 80 if side == 'qr' else 188
     font_size = settings.get(f'{prefix}_title_size', default_font_size)
     color = settings.get(f'{prefix}_title_color', (255, 255, 255))
     default_opacity = 100 if side == 'qr' else 60
@@ -2000,7 +2024,7 @@ def render_title_image(img, title_image, settings, side="qr", qr_code=None):
     prefix = "qr" if side == "qr" else "sol"
     default_pos = 'top' if side == 'qr' else 'in_border_top_left'
     pos = settings.get(f'{prefix}_title_pos', default_pos)
-    default_size = 80 if side == 'qr' else 140
+    default_size = 80 if side == 'qr' else 188
     height = max(1, round(settings.get(f'{prefix}_title_size', default_size)))
     width = max(1, round(title_image.width * height / title_image.height))
     opacity = max(0, min(
@@ -2439,9 +2463,10 @@ def create_pdf_in_memory(songs, progress_bar=None, settings_override=None):
 
     settings = get_pdf_render_settings(get_settings(settings_override))
 
+    page_size = get_pdf_page_size(settings['pdf_print_profile'])
     buffer = io.BytesIO()
-    c = canvas.Canvas(buffer, pagesize=A4)
-    width, height = A4
+    c = canvas.Canvas(buffer, pagesize=page_size)
+    width, height = page_size
     
     # Grid settings (6.5x6.5 cm cards, 12 per page)
     card_size = PDF_CARD_SIZE
@@ -2460,7 +2485,9 @@ def create_pdf_in_memory(songs, progress_bar=None, settings_override=None):
             c, width, height, settings.get('qr_pages_upside_down', False)
         )
 
-        for idx, x, y in get_pdf_card_positions(len(batch_songs)):
+        for idx, x, y in get_pdf_card_positions(
+            len(batch_songs), page_size=page_size
+        ):
             song = batch_songs[idx]
             card_number = starting_number + i + idx
 
@@ -2490,7 +2517,7 @@ def create_pdf_in_memory(songs, progress_bar=None, settings_override=None):
         c.rect(0, 0, width, height, stroke=0, fill=1)
 
         for idx, x, y in get_pdf_card_positions(
-            len(batch_songs), mirrored=True
+            len(batch_songs), mirrored=True, page_size=page_size
         ):
             song = batch_songs[idx]
             card_number = starting_number + i + idx
