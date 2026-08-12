@@ -180,7 +180,7 @@ DEFAULT_DESIGN_SETTINGS = {
     "qr_size_ratio": DEFAULT_QR_SIZE_RATIO,
     
     "neon_ring_opacity": 1.0,
-    "neon_ring_thickness": 12,
+    "neon_ring_thickness": 16,
     "neon_ring_count": 14,
     
     "qr_title": "",
@@ -1798,7 +1798,7 @@ def render_card_background(
         rng = random.Random(seed)
         neon_colors = settings['neon_colors']
         ring_count = settings.get('neon_ring_count', 14)
-        thickness = settings.get('neon_ring_thickness', 12)
+        thickness = settings.get('neon_ring_thickness', 16)
         
         for i in range(ring_count):
             color = neon_colors[i % len(neon_colors)]

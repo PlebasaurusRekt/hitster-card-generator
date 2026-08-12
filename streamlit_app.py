@@ -502,7 +502,7 @@ with st.sidebar:
             st.session_state.qr_bg_y = st.slider("Y Offset", -1.0, 1.0, 0.0, 0.05, key="qr_y")
         
         if qr_bg_type == "neon_rings":
-            st.session_state.neon_ring_thickness = st.slider("Ring Thickness", 1, 50, 12, key="neon_thick")
+            st.session_state.neon_ring_thickness = st.slider("Ring Thickness", 1, 50, 16, key="neon_thick")
             st.session_state.neon_ring_count = st.slider("Ring Count", 1, 20, 14, key="neon_count")
             
             neon_hex_list = dynamic_color_list("neon", "Neon Ring Colors", ["#FF0064", "#00C8FF", "#00FF78", "#FFFF00"])
@@ -663,7 +663,7 @@ with st.sidebar:
         "qr_bg_offset_x": st.session_state.get('qr_x', 0.0),
         "qr_bg_offset_y": st.session_state.get('qr_y', 0.0),
         "neon_colors": st.session_state.get('neon_colors', utils.DEFAULT_DESIGN_SETTINGS['neon_colors']),
-        "neon_ring_thickness": st.session_state.get('neon_thick', 12),
+        "neon_ring_thickness": st.session_state.get('neon_thick', 16),
         "neon_ring_count": st.session_state.get('neon_count', 14),
         "qr_background_mode": qr_bg_mode,
         "qr_module_color": qr_module_color,
