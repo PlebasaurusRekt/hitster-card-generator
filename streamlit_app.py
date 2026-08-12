@@ -992,15 +992,26 @@ if songs:
             preview_render_fingerprint
         )
 
-    pcol1, pcol2 = st.columns(2)
-    with pcol1:
-        st.caption("QR Side")
-        st.image(st.session_state.preview_qr_card, width="stretch")
-    with pcol2:
-        st.caption("Solution Side")
-        st.image(
-            st.session_state.preview_solution_card, width="stretch"
-        )
+    st.markdown(
+        """
+        <style>
+        .st-key-card-preview-images [data-testid="stImage"] img {
+            border-radius: 0;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    with st.container(key="card-preview-images"):
+        pcol1, pcol2 = st.columns(2)
+        with pcol1:
+            st.caption("QR Side")
+            st.image(st.session_state.preview_qr_card, width="stretch")
+        with pcol2:
+            st.caption("Solution Side")
+            st.image(
+                st.session_state.preview_solution_card, width="stretch"
+            )
 
     # --- STEP 3: GENERATE PDF ---
     st.divider()
