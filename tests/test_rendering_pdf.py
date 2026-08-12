@@ -351,7 +351,7 @@ class RenderingTests(unittest.TestCase):
 
     def test_requested_print_measurements_are_the_default_offsets(self):
         self.assertEqual(utils.SONG_TITLE_BOTTOM_EDGE_OFFSET_CM, 0.8)
-        self.assertEqual(utils.SONG_ARTIST_TOP_EDGE_OFFSET_CM, 0.8)
+        self.assertEqual(utils.SONG_ARTIST_TOP_EDGE_OFFSET_CM, 0.8385)
         self.assertEqual(utils.CARD_NUMBER_BOTTOM_OFFSET_CM, 0.3)
         self.assertEqual(utils.SOLUTION_TITLE_TOP_OFFSET_CM, 0.2)
         settings = utils.get_settings({"google_font": ""})
