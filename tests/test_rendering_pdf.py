@@ -213,6 +213,73 @@ class RenderingTests(unittest.TestCase):
             utils.FONT_CACHE_MAX_ENTRIES,
         )
 
+    def test_font_weights_keep_every_value_in_the_100_to_900_range(self):
+        self.assertEqual(utils.normalize_font_weight(100), 100)
+        self.assertEqual(utils.normalize_font_weight(237), 237)
+        self.assertEqual(utils.normalize_font_weight(900), 900)
+        self.assertEqual(utils.normalize_font_weight(-10), 100)
+        self.assertEqual(utils.normalize_font_weight(1000), 900)
+
+    def test_google_font_selects_each_standard_weight_exactly(self):
+        variants = [
+            {'id': str(weight), 'ttf': f'https://example.test/{weight}.ttf'}
+            for weight in range(100, 901, 100)
+        ]
+
+        for weight in range(100, 901, 100):
+            variant = utils._select_google_font_variant(
+                variants, weight, italic=False
+            )
+            self.assertEqual(variant['id'], str(weight))
+
+    def test_intermediate_weight_prefers_a_variable_font(self):
+        variants = [
+            {
+                'id': str(weight),
+                'ttf': f'https://example.test/{weight}.ttf',
+            }
+            for weight in range(100, 901, 100)
+        ]
+        variants.append({
+            'id': 'variable',
+            'ttf': 'https://example.test/variable.ttf',
+        })
+
+        variant = utils._select_google_font_variant(
+            variants, 237, italic=False
+        )
+        self.assertEqual(variant['id'], 'variable')
+
+    def test_variable_font_uses_the_requested_weight_axis_value(self):
+        class FakeVariableFont:
+            def __init__(self):
+                self.values = None
+
+            def get_variation_axes(self):
+                return [
+                    {
+                        'name': b'Weight',
+                        'minimum': 100,
+                        'default': 400,
+                        'maximum': 900,
+                    },
+                    {
+                        'name': b'Width',
+                        'minimum': 75,
+                        'default': 100,
+                        'maximum': 125,
+                    },
+                ]
+
+            def set_variation_by_axes(self, values):
+                self.values = values
+
+        font = FakeVariableFont()
+        returned_font = utils._apply_font_weight_variation(font, 237)
+
+        self.assertIs(returned_font, font)
+        self.assertEqual(font.values, [237, 100])
+
     def test_solution_text_blocks_keep_exact_edge_offsets_when_wrapped(self):
         size = 2000
         artist_edge_offset = utils.card_distance_cm_to_pixels(

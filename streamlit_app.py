@@ -7,7 +7,7 @@ import pandas as pd
 import src.input_validation as input_validation
 import src.utils as utils
 
-EXPECTED_UTILS_API_VERSION = 5
+EXPECTED_UTILS_API_VERSION = 6
 if getattr(utils, 'UTILS_API_VERSION', 0) < EXPECTED_UTILS_API_VERSION:
     utils = importlib.reload(utils)
 
@@ -19,12 +19,8 @@ DEFAULT_COLOR_GRADIENT = [
     "#7030A0", "#E31C79", "#FF6B9D", "#FFA500",
     "#FFD700", "#87CEEB", "#4169E1",
 ]
-FONT_WEIGHTS = (100, 200, 300, 400, 500, 600, 700, 800, 900)
-FONT_WEIGHT_NAMES = {
-    100: "Thin", 200: "Extra Light", 300: "Light", 400: "Regular",
-    500: "Medium", 600: "Semi Bold", 700: "Bold",
-    800: "Extra Bold", 900: "Black",
-}
+FONT_WEIGHT_MIN = 100
+FONT_WEIGHT_MAX = 900
 
 OUTPUT_DIR = "output"
 LINKS_FILE = "links.txt"
@@ -41,12 +37,18 @@ def reset_generation():
 
 
 def font_weight_slider(label, default, key):
-    """Render a consistently labelled CSS font-weight slider."""
-    return st.select_slider(
+    """Render a continuous CSS font-weight slider."""
+    return st.slider(
         label,
-        options=FONT_WEIGHTS,
+        min_value=FONT_WEIGHT_MIN,
+        max_value=FONT_WEIGHT_MAX,
         value=default,
-        format_func=lambda weight: f"{FONT_WEIGHT_NAMES[weight]} ({weight})",
+        step=1,
+        help=(
+            "Choose any weight from 100 (Thin) through 900 (Black). "
+            "Variable fonts use the exact value; other fonts use their "
+            "closest available face."
+        ),
         key=key,
     )
 

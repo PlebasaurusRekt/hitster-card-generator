@@ -38,7 +38,7 @@ from src.input_validation import (
     rasterize_svg_image,
 )
 
-UTILS_API_VERSION = 5
+UTILS_API_VERSION = 6
 CARD_PHYSICAL_SIZE_CM = 6.5
 DEFAULT_QR_CODE_SIZE_CM = 2.5
 DEFAULT_QR_BORDER_CM = 0.1
@@ -1171,12 +1171,12 @@ def _bounded_cache_put(cache, key, value, max_entries):
 
 
 def normalize_font_weight(weight, default=400):
-    """Return a supported CSS font weight from 100 through 900."""
+    """Return a CSS font weight clamped to the supported 100–900 range."""
     try:
-        weight = int(weight)
-    except (TypeError, ValueError):
+        weight = round(float(weight))
+    except (TypeError, ValueError, OverflowError):
         weight = default
-    return min(900, max(100, round(weight / 100) * 100))
+    return min(900, max(100, weight))
 
 
 def _font_variant_details(variant):
@@ -1192,6 +1192,12 @@ def _font_variant_details(variant):
     return normalize_font_weight(weight), italic
 
 
+def _is_variable_font_variant(variant):
+    """Return whether a provider variant is a variable font file."""
+    variant_id = str(variant.get('id', '')).lower()
+    return 'variable' in variant_id or bool(variant.get('axes'))
+
+
 def _select_google_font_variant(variants, weight, italic):
     """Select the exact or closest available weight for the requested style."""
     candidates = [variant for variant in variants if variant.get('ttf')]
@@ -1203,6 +1209,19 @@ def _select_google_font_variant(variants, weight, italic):
         if _font_variant_details(variant)[1] == italic
     ]
     pool = matching_style or candidates
+    exact_weight = [
+        variant for variant in pool
+        if _font_variant_details(variant)[0] == weight
+    ]
+    if exact_weight:
+        return exact_weight[0]
+
+    variable_variants = [
+        variant for variant in pool if _is_variable_font_variant(variant)
+    ]
+    if variable_variants:
+        return variable_variants[0]
+
     return min(
         pool,
         key=lambda variant: (
@@ -1210,6 +1229,35 @@ def _select_google_font_variant(variants, weight, italic):
             _font_variant_details(variant)[0],
         ),
     )
+
+
+def _apply_font_weight_variation(font, weight):
+    """Set a variable font's ``wght`` axis when the font exposes one.
+
+    Static font files deliberately pass through unchanged: their nearest
+    available face has already been selected by ``_select_google_font_variant``.
+    """
+    try:
+        axes = font.get_variation_axes()
+    except (AttributeError, OSError):
+        return font
+
+    try:
+        values = [axis['default'] for axis in axes]
+        for index, axis in enumerate(axes):
+            axis_name = axis.get('name', b'')
+            if isinstance(axis_name, bytes):
+                axis_name = axis_name.decode('ascii', errors='ignore')
+            if str(axis_name).strip().lower() not in ('weight', 'wght'):
+                continue
+            values[index] = max(
+                axis['minimum'], min(axis['maximum'], weight)
+            )
+            font.set_variation_by_axes(values)
+            break
+    except (AttributeError, KeyError, TypeError, ValueError, OSError):
+        pass
+    return font
 
 
 def get_google_font(family_name, size, fallback_font, italic=False, weight=700):
@@ -1279,6 +1327,7 @@ def get_google_font(family_name, size, fallback_font, italic=False, weight=700):
     if font_bytes:
         try:
             font = ImageFont.truetype(io.BytesIO(font_bytes), size)
+            font = _apply_font_weight_variation(font, weight)
             _bounded_cache_put(
                 _google_font_cache, cache_key, font,
                 FONT_CACHE_MAX_ENTRIES,
