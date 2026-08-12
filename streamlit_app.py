@@ -7,7 +7,7 @@ import pandas as pd
 import src.input_validation as input_validation
 import src.utils as utils
 
-EXPECTED_UTILS_API_VERSION = 6
+EXPECTED_UTILS_API_VERSION = 8
 if getattr(utils, 'UTILS_API_VERSION', 0) < EXPECTED_UTILS_API_VERSION:
     utils = importlib.reload(utils)
 
@@ -21,6 +21,7 @@ DEFAULT_COLOR_GRADIENT = [
 ]
 FONT_WEIGHT_MIN = 100
 FONT_WEIGHT_MAX = 900
+FONT_WEIGHT_STEP = 1
 
 OUTPUT_DIR = "output"
 LINKS_FILE = "links.txt"
@@ -37,20 +38,29 @@ def reset_generation():
 
 
 def font_weight_slider(label, default, key):
-    """Render a continuous CSS font-weight slider."""
-    return st.slider(
-        label,
-        min_value=FONT_WEIGHT_MIN,
-        max_value=FONT_WEIGHT_MAX,
-        value=default,
-        step=1,
-        help=(
+    """Render a continuous 100–900 variable-font weight slider."""
+    saved_weight = st.session_state.get(key)
+    slider_kwargs = {
+        "label": label,
+        "min_value": FONT_WEIGHT_MIN,
+        "max_value": FONT_WEIGHT_MAX,
+        "step": FONT_WEIGHT_STEP,
+        "help": (
             "Choose any weight from 100 (Thin) through 900 (Black). "
-            "Variable fonts use the exact value; other fonts use their "
-            "closest available face."
+            "Montserrat uses its variable-font weight axis for exact "
+            "per-point preview changes."
         ),
-        key=key,
-    )
+        "key": key,
+    }
+    if saved_weight is not None:
+        normalized_weight = utils.normalize_font_weight(
+            saved_weight, default
+        )
+        if normalized_weight != saved_weight:
+            st.session_state[key] = normalized_weight
+    else:
+        slider_kwargs["value"] = default
+    return st.slider(**slider_kwargs)
 
 def set_example_playlist():
     st.session_state.user_input = "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M"

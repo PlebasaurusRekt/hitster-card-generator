@@ -38,7 +38,7 @@ from src.input_validation import (
     rasterize_svg_image,
 )
 
-UTILS_API_VERSION = 6
+UTILS_API_VERSION = 8
 CARD_PHYSICAL_SIZE_CM = 6.5
 DEFAULT_QR_CODE_SIZE_CM = 2.5
 DEFAULT_QR_BORDER_CM = 0.1
@@ -1145,9 +1145,21 @@ FONT_VARIANT_CACHE_MAX_ENTRIES = 32
 FONT_API_MAX_BYTES = 1024 * 1024
 FONT_FILE_MAX_BYTES = 5 * 1024 * 1024
 FONT_PROVIDER_HOSTS = {
-    'gwfh.mranftl.com', 'fonts.gstatic.com',
+    'gwfh.mranftl.com', 'fonts.gstatic.com', 'raw.githubusercontent.com',
 }
 _google_font_cache = OrderedDict()
+GOOGLE_FONT_VARIABLE_TTF_URLS = {
+    'montserrat': {
+        False: (
+            'https://raw.githubusercontent.com/google/fonts/main/ofl/'
+            'montserrat/Montserrat%5Bwght%5D.ttf'
+        ),
+        True: (
+            'https://raw.githubusercontent.com/google/fonts/main/ofl/'
+            'montserrat/Montserrat-Italic%5Bwght%5D.ttf'
+        ),
+    },
+}
 _google_font_variants_cache = OrderedDict()
 _font_cache_lock = threading.RLock()
 
@@ -1261,13 +1273,21 @@ def _apply_font_weight_variation(font, weight):
 
 
 def get_google_font(family_name, size, fallback_font, italic=False, weight=700):
-    """Download and cache the closest Google Font weight, or return fallback."""
+    """Download and cache the requested Google Font weight, or return fallback."""
     if not family_name:
         return fallback_font
 
     weight = normalize_font_weight(weight, default=700)
     font_id = family_name.lower().replace(" ", "-")
-    font_bytes_key = (font_id, weight, italic)
+    static_font_bytes_key = (font_id, weight, italic)
+    variable_font_url = GOOGLE_FONT_VARIABLE_TTF_URLS.get(font_id, {}).get(
+        italic
+    )
+    font_bytes_key = (
+        ('variable', font_id, italic)
+        if variable_font_url
+        else static_font_bytes_key
+    )
     cache_key = (font_id, weight, italic, size)
 
     cached_font = _bounded_cache_get(_google_font_cache, cache_key)
@@ -1277,6 +1297,21 @@ def get_google_font(family_name, size, fallback_font, italic=False, weight=700):
     font_bytes = _bounded_cache_get(
         _google_font_cache, font_bytes_key
     )
+    if not font_bytes and variable_font_url:
+        try:
+            font_bytes, _, _ = get_bounded_https_content(
+                variable_font_url,
+                allowed_hosts=FONT_PROVIDER_HOSTS,
+                max_bytes=FONT_FILE_MAX_BYTES,
+                timeout=5,
+            )
+            _bounded_cache_put(
+                _google_font_cache, font_bytes_key, font_bytes,
+                FONT_CACHE_MAX_ENTRIES,
+            )
+        except requests.RequestException as exc:
+            print(f"Error downloading variable font: {type(exc).__name__}")
+
     if not font_bytes:
         try:
             variants = _bounded_cache_get(
@@ -1312,7 +1347,7 @@ def get_google_font(family_name, size, fallback_font, italic=False, weight=700):
                     timeout=5,
                 )
                 _bounded_cache_put(
-                    _google_font_cache, font_bytes_key, font_bytes,
+                    _google_font_cache, static_font_bytes_key, font_bytes,
                     FONT_CACHE_MAX_ENTRIES,
                 )
         except (

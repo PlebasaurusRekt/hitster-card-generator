@@ -219,6 +219,41 @@ class RenderingTests(unittest.TestCase):
         self.assertEqual(utils.normalize_font_weight(900), 900)
         self.assertEqual(utils.normalize_font_weight(-10), 100)
         self.assertEqual(utils.normalize_font_weight(1000), 900)
+        self.assertEqual(utils.normalize_font_weight(251), 251)
+
+    def test_montserrat_uses_a_cached_variable_font_for_exact_weights(self):
+        fallback = object()
+        variable_font = object()
+        variable_url = utils.GOOGLE_FONT_VARIABLE_TTF_URLS[
+            'montserrat'
+        ][False]
+
+        with (
+            patch.object(utils, '_google_font_cache', utils.OrderedDict()),
+            patch(
+                'src.utils.get_bounded_https_content',
+                return_value=(b'variable font', variable_url, 200),
+            ) as download,
+            patch(
+                'src.utils.ImageFont.truetype', return_value=variable_font
+            ),
+            patch(
+                'src.utils._apply_font_weight_variation',
+                return_value=variable_font,
+            ) as apply_weight,
+        ):
+            returned_font = utils.get_google_font(
+                'Montserrat', 120, fallback, weight=237
+            )
+
+        self.assertIs(returned_font, variable_font)
+        download.assert_called_once_with(
+            variable_url,
+            allowed_hosts=utils.FONT_PROVIDER_HOSTS,
+            max_bytes=utils.FONT_FILE_MAX_BYTES,
+            timeout=5,
+        )
+        apply_weight.assert_called_once_with(variable_font, 237)
 
     def test_google_font_selects_each_standard_weight_exactly(self):
         variants = [
