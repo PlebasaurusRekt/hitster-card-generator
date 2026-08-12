@@ -47,9 +47,8 @@ DEFAULT_QR_TOTAL_SIZE_CM = (
 )
 DEFAULT_QR_SIZE_RATIO = DEFAULT_QR_CODE_SIZE_CM / CARD_PHYSICAL_SIZE_CM
 NEON_RING_EDGE_CLEARANCE_CM = 0.3
-# Keep the artist ink edge 12 px lower at the 2000 px preview resolution
-# (8.385 mm below the top trim edge). This physical offset scales for print.
-SONG_ARTIST_TOP_EDGE_OFFSET_CM = 0.8385
+# Keep the artist ink edge aligned 8 mm below the top trim edge.
+SONG_ARTIST_TOP_EDGE_OFFSET_CM = 0.8
 # The raster-to-print calibration puts the rendered song-title ink 0.1 cm
 # farther from the trim edge than its coordinate says.  Use 0.8 cm here so
 # its printed bottom clearance is the requested 0.9 cm.
