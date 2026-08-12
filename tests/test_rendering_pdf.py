@@ -155,7 +155,7 @@ class RenderingTests(unittest.TestCase):
             utils.card_distance_cm_to_pixels(
                 size, utils.SOLUTION_TITLE_LEFT_OFFSET_CM
             ),
-            50,
+            35,
         )
         settings = utils.get_settings({
             "card_size": size,

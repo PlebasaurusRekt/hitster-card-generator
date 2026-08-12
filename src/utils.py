@@ -56,9 +56,9 @@ SONG_TITLE_BOTTOM_EDGE_OFFSET_CM = 0.8
 # Keep artist and song-title text at least 2 mm from the central song year.
 SONG_TEXT_TO_YEAR_CLEARANCE_CM = 0.2
 SOLUTION_TITLE_TOP_OFFSET_CM = 0.2
-# At the standard 2000 px preview size, this places title artwork 50 px
+# At the standard 2000 px preview size, this places title artwork 35 px
 # (rather than 62 px) from the left trim edge.
-SOLUTION_TITLE_LEFT_OFFSET_CM = 0.1625
+SOLUTION_TITLE_LEFT_OFFSET_CM = 0.11375
 CARD_NUMBER_RIGHT_OFFSET_CM = 0.3
 CARD_NUMBER_BOTTOM_OFFSET_CM = 0.3
 SONG_ARTIST_TO_YEAR_GAP_CM = 1.4
