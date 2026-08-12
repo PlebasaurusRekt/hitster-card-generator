@@ -151,6 +151,12 @@ class RenderingTests(unittest.TestCase):
 
     def test_solution_title_artwork_uses_the_configured_physical_offsets(self):
         size = 2000
+        self.assertEqual(
+            utils.card_distance_cm_to_pixels(
+                size, utils.SOLUTION_TITLE_LEFT_OFFSET_CM
+            ),
+            50,
+        )
         settings = utils.get_settings({
             "card_size": size,
             "sol_title_enabled": True,
