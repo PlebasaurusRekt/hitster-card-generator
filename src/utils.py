@@ -159,7 +159,7 @@ DEFAULT_DESIGN_SETTINGS = {
     "google_font": "Montserrat",
     "card_number_font_weight": 600,
     "card_set_title_font_weight": 500,
-    "song_artist_font_weight": 500,
+    "song_artist_font_weight": 565,
     "song_year_font_weight": 700,
     "song_title_font_weight": 300,
 
@@ -2367,7 +2367,7 @@ def create_solution_side_in_memory(
     # protected area around the central year.
     font_artist, artist_text = fit_song_text_to_height(
         draw, artist, settings, settings.get('song_artist_size', 155),
-        role="artist", weight=settings.get('song_artist_font_weight', 500),
+        role="artist", weight=settings.get('song_artist_font_weight', 565),
         italic=False, max_width=max_width,
         max_height=year_bbox[1] - text_clearance - artist_edge_offset,
     )

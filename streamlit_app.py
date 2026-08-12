@@ -279,7 +279,7 @@ with st.sidebar:
                 "Card Set Name", 500, "card_set_title_font_weight"
             )
             song_artist_font_weight = font_weight_slider(
-                "Song Artist", 500, "song_artist_font_weight"
+                "Song Artist", 565, "song_artist_font_weight"
             )
             song_year_font_weight = font_weight_slider(
                 "Song Year", 700, "song_year_font_weight"
