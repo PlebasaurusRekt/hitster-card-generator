@@ -1,3 +1,4 @@
+import colorsys
 import math
 import random
 import tempfile
@@ -248,7 +249,7 @@ class RenderingTests(unittest.TestCase):
 
     def test_requested_print_measurements_are_the_default_offsets(self):
         self.assertEqual(utils.SONG_TITLE_BOTTOM_EDGE_OFFSET_CM, 0.8)
-        self.assertEqual(utils.SONG_ARTIST_TOP_EDGE_OFFSET_CM, 0.9)
+        self.assertEqual(utils.SONG_ARTIST_TOP_EDGE_OFFSET_CM, 0.8)
         self.assertEqual(utils.CARD_NUMBER_BOTTOM_OFFSET_CM, 0.3)
         self.assertEqual(utils.SOLUTION_TITLE_TOP_OFFSET_CM, 0.2)
         settings = utils.get_settings({"google_font": ""})
@@ -261,15 +262,21 @@ class RenderingTests(unittest.TestCase):
         )
         self.assertAlmostEqual(glyph_height_cm, 1.4, places=2)
 
-    def test_solution_wash_preserves_old_span_with_a_warmer_brighter_pair(self):
+    def test_solution_wash_only_adds_luminance_to_the_base_color(self):
         for color in utils.DEFAULT_DESIGN_SETTINGS["color_gradient"]:
-            base, bright = utils.derive_solution_color_wash_palette(color)
-            old_warm = utils._derive_unexpanded_solution_warm_color(base)
-            old_span = utils._solution_wash_target_distance(base, old_warm)
-            self.assertAlmostEqual(
-                math.dist(base, bright), old_span, delta=1.0
+            base, lighter = utils.derive_solution_color_wash_palette(color)
+            base_hls = colorsys.rgb_to_hls(*(channel / 255 for channel in base))
+            lighter_hls = colorsys.rgb_to_hls(
+                *(channel / 255 for channel in lighter)
             )
-            self.assertGreater(sum(bright), sum(base))
+            self.assertAlmostEqual(lighter_hls[0], base_hls[0], delta=0.01)
+            self.assertAlmostEqual(lighter_hls[2], base_hls[2], delta=0.01)
+            self.assertGreater(lighter_hls[1], base_hls[1])
+
+        base, unchanged = utils.derive_solution_color_wash_palette(
+            "#7030A0", separation=0
+        )
+        self.assertEqual(unchanged, base)
 
     def test_solution_title_and_card_numbers_keep_physical_offsets(self):
         size = 2000
@@ -375,6 +382,63 @@ class RenderingTests(unittest.TestCase):
         ) * utils.CARD_PHYSICAL_SIZE_CM / size
         self.assertGreater(artist_gap_cm, 0)
         self.assertGreater(title_gap_cm, 0)
+
+    def test_long_song_text_shrinks_outside_the_year_clearance(self):
+        size = 2000
+        settings_override = {
+            "card_size": size,
+            "google_font": "",
+            "ink_saving_mode": True,
+            "sol_title_enabled": False,
+        }
+        settings = utils.get_settings(settings_override)
+        artist = "The Incredibly Long Artist Name " * 10
+        song_name = "A Very Long Song Title That Needs To Be Kept Clear " * 10
+        empty_text_card = utils.create_solution_side_in_memory(
+            "", "", 2013, [2013], settings_override=settings_override,
+        )
+        card = utils.create_solution_side_in_memory(
+            song_name, artist, 2013, [2013], settings_override=settings_override,
+        )
+
+        draw = ImageDraw.Draw(Image.new("RGB", (size, size), "white"))
+        year_font = utils.get_font_for_setting(
+            settings, settings["song_year_size"], role="year",
+            weight=settings["song_year_font_weight"],
+        )
+        year_bbox = draw.textbbox(
+            (size / 2, size / 2), "2013", font=year_font, anchor="mm"
+        )
+        clearance = utils.card_distance_cm_to_pixels(
+            size, utils.SONG_TEXT_TO_YEAR_CLEARANCE_CM
+        )
+        protected_top = year_bbox[1] - clearance
+        protected_bottom = year_bbox[3] + clearance
+
+        text_difference = ImageChops.difference(card, empty_text_card)
+        protected_area = text_difference.crop(
+            (0, protected_top, size, protected_bottom)
+        )
+        self.assertIsNone(protected_area.getbbox())
+
+        artist_font, _ = utils.fit_song_text_to_height(
+            draw, artist, settings, settings["song_artist_size"],
+            role="artist", weight=settings["song_artist_font_weight"],
+            italic=False, max_width=size - 2 * round(size * 0.075),
+            max_height=year_bbox[1] - clearance - utils.card_distance_cm_to_pixels(
+                size, utils.SONG_ARTIST_TOP_EDGE_OFFSET_CM
+            ),
+        )
+        title_font, _ = utils.fit_song_text_to_height(
+            draw, song_name, settings, settings["song_title_size"],
+            role="song", weight=settings["song_title_font_weight"],
+            italic=True, max_width=size - 2 * round(size * 0.075),
+            max_height=(size - utils.card_distance_cm_to_pixels(
+                size, utils.SONG_TITLE_BOTTOM_EDGE_OFFSET_CM
+            )) - year_bbox[3] - clearance,
+        )
+        self.assertLess(artist_font.size, settings["song_artist_size"])
+        self.assertLess(title_font.size, settings["song_title_size"])
 
 
 class PdfLayoutTests(unittest.TestCase):

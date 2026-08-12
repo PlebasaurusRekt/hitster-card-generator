@@ -40,12 +40,12 @@ def reset_generation():
     st.session_state.pop('pdf_fingerprint', None)
 
 
-def font_weight_selectbox(label, default, key):
-    """Render a consistently labelled CSS font-weight selector."""
-    return st.selectbox(
+def font_weight_slider(label, default, key):
+    """Render a consistently labelled CSS font-weight slider."""
+    return st.select_slider(
         label,
-        FONT_WEIGHTS,
-        index=FONT_WEIGHTS.index(default),
+        options=FONT_WEIGHTS,
+        value=default,
         format_func=lambda weight: f"{FONT_WEIGHT_NAMES[weight]} ({weight})",
         key=key,
     )
@@ -260,19 +260,19 @@ with st.sidebar:
             google_font = font_choice
 
         with st.expander("🔤 Font Weights", expanded=True):
-            card_number_font_weight = font_weight_selectbox(
+            card_number_font_weight = font_weight_slider(
                 "Card Number", 600, "card_number_font_weight"
             )
-            card_set_title_font_weight = font_weight_selectbox(
+            card_set_title_font_weight = font_weight_slider(
                 "Card Set Name", 500, "card_set_title_font_weight"
             )
-            song_artist_font_weight = font_weight_selectbox(
+            song_artist_font_weight = font_weight_slider(
                 "Song Artist", 500, "song_artist_font_weight"
             )
-            song_year_font_weight = font_weight_selectbox(
+            song_year_font_weight = font_weight_slider(
                 "Song Year", 700, "song_year_font_weight"
             )
-            song_title_font_weight = font_weight_selectbox(
+            song_title_font_weight = font_weight_slider(
                 "Song Title", 300, "song_title_font_weight"
             )
             
@@ -560,15 +560,15 @@ with st.sidebar:
             value=True,
             help=(
                 "Uses each card's year-gradient color with a randomized "
-                "brighter, warmer field."
+                "lighter field of the same color."
             ),
         )
         sol_bg_type = "gradient"
         if sol_color_wash_enabled:
             st.caption(
                 "The base comes from the Year Color Gradient. Each card blends "
-                "from that base into a brighter, warmer field with a strong "
-                "colour offset and per-card variation."
+                "from that base into a lighter version of the same colour, "
+                "with per-card variation."
             )
         else:
             sol_bg_type = st.selectbox(

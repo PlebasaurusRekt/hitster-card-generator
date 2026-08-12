@@ -11,7 +11,6 @@ import time
 import os
 import random
 import secrets
-import textwrap
 import re
 import zlib
 import threading
@@ -48,11 +47,14 @@ DEFAULT_QR_TOTAL_SIZE_CM = (
 )
 DEFAULT_QR_SIZE_RATIO = DEFAULT_QR_CODE_SIZE_CM / CARD_PHYSICAL_SIZE_CM
 NEON_RING_EDGE_CLEARANCE_CM = 0.3
-SONG_ARTIST_TOP_EDGE_OFFSET_CM = 0.9
+# Keep the artist ink edge aligned 8 mm below the top trim edge.
+SONG_ARTIST_TOP_EDGE_OFFSET_CM = 0.8
 # The raster-to-print calibration puts the rendered song-title ink 0.1 cm
 # farther from the trim edge than its coordinate says.  Use 0.8 cm here so
 # its printed bottom clearance is the requested 0.9 cm.
 SONG_TITLE_BOTTOM_EDGE_OFFSET_CM = 0.8
+# Keep artist and song-title text at least 2 mm from the central song year.
+SONG_TEXT_TO_YEAR_CLEARANCE_CM = 0.2
 SOLUTION_TITLE_TOP_OFFSET_CM = 0.2
 SOLUTION_TITLE_LEFT_OFFSET_CM = 0.2
 CARD_NUMBER_RIGHT_OFFSET_CM = 0.3
@@ -1571,93 +1573,32 @@ def apply_background_image(img, bg_img, scale, offset_x, offset_y, card_size):
     img.paste(transformed, (0, 0), transformed)
 
 
-def _derive_legacy_solution_cool_color(base_rgb):
-    """Return the former cool/dark endpoint for palette-span calculation."""
-    cool_target = (35, 55, 145)
-    return tuple(
-        round((base_channel * 0.84 + target_channel * 0.16) * 0.88)
-        for base_channel, target_channel in zip(base_rgb, cool_target)
-    )
-
-
-def _derive_unexpanded_solution_warm_color(base_rgb):
-    """Return the former maximum warmer/brighter endpoint."""
+def _derive_lighter_solution_color(base_rgb):
+    """Return the base colour with luminance added, without shifting its hue."""
     red, green, blue = (channel / 255 for channel in base_rgb)
     hue, lightness, saturation = colorsys.rgb_to_hls(red, green, blue)
-    distance = (25 / 360 - hue + 0.5) % 1.0 - 0.5
-    warm_hue = (hue + distance * 0.24) % 1.0
-    warm = colorsys.hls_to_rgb(
-        warm_hue,
+    lighter = colorsys.hls_to_rgb(
+        hue,
         lightness + (1.0 - lightness) * 0.22,
-        min(1.0, max(saturation, 0.08) + 0.05),
+        saturation,
     )
-    return tuple(round(channel * 255) for channel in warm)
-
-
-def _color_at_distance(base_rgb, endpoint_rgb, distance):
-    """Move from base toward endpoint by the requested RGB-space distance."""
-    delta = tuple(
-        end_channel - base_channel
-        for base_channel, end_channel in zip(base_rgb, endpoint_rgb)
-    )
-    length = math.sqrt(sum(channel ** 2 for channel in delta))
-    if not length:
-        return base_rgb
-    return tuple(
-        max(0, min(255, round(base_channel + channel * distance / length)))
-        for base_channel, channel in zip(base_rgb, delta)
-    )
-
-
-def _solution_wash_target_distance(base_rgb, warm_rgb):
-    """Return the former maximum warm-to-cool wash span."""
-    legacy_cool_rgb = _derive_legacy_solution_cool_color(base_rgb)
-    return math.dist(warm_rgb, legacy_cool_rgb)
+    return tuple(round(channel * 255) for channel in lighter)
 
 
 def derive_solution_color_wash_palette(base_color, separation=1.0):
-    """Return the base and an expanded warmer/brighter companion color.
-
-    The old wash placed a warm/light field opposite a cool/dark field.  The
-    new wash keeps only the base colour and a warm/light companion.  Its
-    colour offset is expanded to match the previous maximum warm-to-cool span,
-    preserving the amount of visual variation without adding a cool cast.
-    """
+    """Return the base colour and a luminance-only lighter companion colour."""
     base_rgb = tuple(round(channel * 255) for channel in to_rgba(base_color)[:3])
-    maximum_warm_rgb = _derive_unexpanded_solution_warm_color(base_rgb)
-    legacy_distance = _solution_wash_target_distance(
-        base_rgb, maximum_warm_rgb
-    )
-    expanded_warm_rgb = _color_at_distance(
-        base_rgb, maximum_warm_rgb, legacy_distance
-    )
-
-    # If expanding the original warm direction would overflow RGB bounds,
-    # redirect it toward a warm, bright anchor so the full former span still
-    # fits on the card without reintroducing a cooler/darker endpoint.
-    if math.dist(base_rgb, expanded_warm_rgb) < legacy_distance - 1:
-        for warm_bright_anchor in (
-            (255, 224, 128), (255, 255, 0), (255, 255, 255),
-        ):
-            if (
-                sum(warm_bright_anchor) > sum(base_rgb)
-                and math.dist(base_rgb, warm_bright_anchor) >= legacy_distance
-            ):
-                expanded_warm_rgb = _color_at_distance(
-                    base_rgb, warm_bright_anchor, legacy_distance
-                )
-                break
-
     separation = max(0.0, min(1.0, float(separation)))
-    warm_rgb = tuple(
-        round(base_channel + (warm_channel - base_channel) * separation)
-        for base_channel, warm_channel in zip(base_rgb, expanded_warm_rgb)
+    lighter_rgb = _derive_lighter_solution_color(base_rgb)
+    luminance_rgb = tuple(
+        round(base_channel + (lighter_channel - base_channel) * separation)
+        for base_channel, lighter_channel in zip(base_rgb, lighter_rgb)
     )
-    return base_rgb, warm_rgb
+    return base_rgb, luminance_rgb
 
 
 def render_solution_color_wash(img, settings, seed=42):
-    """Render a base-to-warmer/brighter solution colour wash."""
+    """Render a base-to-lighter solution colour wash."""
     rng = np.random.default_rng(seed & 0xFFFFFFFF)
     base_color = settings.get('sol_color_wash_base_color', (213, 43, 131))
     base = tuple(round(channel * 255) for channel in to_rgba(base_color)[:3])
@@ -1684,15 +1625,17 @@ def render_solution_color_wash(img, settings, seed=42):
         alpha = (strength * field_opacity)[..., np.newaxis]
         canvas[:] += (np.asarray(field_color, dtype=np.float32) - canvas) * alpha
 
-    # Keep a clearly visible warm field while retaining per-card variation.
-    warm_separation = rng.uniform(0.90, 1.0)
-    warm_opacity = rng.uniform(0.75, 0.95)
-    warm_edge_influence = rng.uniform(0.80, 1.0)
-    _, warm = derive_solution_color_wash_palette(
-        base, separation=warm_separation
+    # Keep a clearly visible lighter field while retaining per-card variation.
+    luminance_separation = rng.uniform(0.90, 1.0)
+    luminance_opacity = rng.uniform(0.75, 0.95)
+    luminance_edge_influence = rng.uniform(0.80, 1.0)
+    _, lighter = derive_solution_color_wash_palette(
+        base, separation=luminance_separation
     )
-    warm_angle = rng.uniform(0, 2 * np.pi)
-    apply_color_field(warm, warm_opacity, warm_edge_influence, warm_angle)
+    luminance_angle = rng.uniform(0, 2 * np.pi)
+    apply_color_field(
+        lighter, luminance_opacity, luminance_edge_influence, luminance_angle
+    )
 
     # The deliberately strong fields survive 8-bit conversion cleanly. Resize
     # the compact mesh once instead of resampling three full-resolution float
@@ -2186,6 +2129,86 @@ def draw_centered_text_at_edge(draw, text, font, center_x, edge_y, edge):
     )
 
 
+def wrap_text_to_width(draw, text, font, max_width):
+    """Wrap text to an exact pixel width, preserving explicit line breaks."""
+    text = str(text or "")
+    if not text:
+        return ""
+
+    def text_width(value):
+        bbox = draw.textbbox((0, 0), value, font=font)
+        return bbox[2] - bbox[0]
+
+    lines = []
+    for paragraph in text.splitlines() or [""]:
+        words = paragraph.split()
+        if not words:
+            lines.append("")
+            continue
+
+        line = ""
+        for word in words:
+            candidate = f"{line} {word}".strip()
+            if line and text_width(candidate) > max_width:
+                lines.append(line)
+                line = ""
+
+            if not line and text_width(word) > max_width:
+                fragment = ""
+                for character in word:
+                    candidate = f"{fragment}{character}"
+                    if fragment and text_width(candidate) > max_width:
+                        lines.append(fragment)
+                        fragment = character
+                    else:
+                        fragment = candidate
+                line = fragment
+            else:
+                line = word if not line else candidate
+
+        lines.append(line)
+
+    return "\n".join(lines)
+
+
+def fit_song_text_to_height(
+    draw, text, settings, font_size, role, weight, italic, max_width,
+    max_height,
+):
+    """Return the largest wrapped song-text block that fits ``max_height``."""
+    requested_size = max(1, int(font_size))
+    max_height = max(0, max_height)
+
+    def layout_for_size(candidate_size):
+        font = get_font_for_setting(
+            settings, candidate_size, role=role, italic=italic, weight=weight,
+        )
+        wrapped_text = wrap_text_to_width(draw, text, font, max_width)
+        bbox = draw.multiline_textbbox(
+            (0, 0), wrapped_text, font=font, align="center"
+        )
+        return font, wrapped_text, bbox[3] - bbox[1]
+
+    if not text:
+        font, wrapped_text, _ = layout_for_size(requested_size)
+        return font, wrapped_text
+
+    best_layout = None
+    low, high = 1, requested_size
+    while low <= high:
+        candidate_size = (low + high) // 2
+        candidate = layout_for_size(candidate_size)
+        if candidate[2] <= max_height:
+            best_layout = candidate
+            low = candidate_size + 1
+        else:
+            high = candidate_size - 1
+
+    if best_layout is None:
+        best_layout = layout_for_size(1)
+    return best_layout[:2]
+
+
 def create_solution_side_in_memory(
     song_name, artist, year, all_years, settings_override=None, card_number=None
 ):
@@ -2238,49 +2261,42 @@ def create_solution_side_in_memory(
         ), role="year",
         weight=settings.get('song_year_font_weight', 700),
     )
-    font_artist = get_font_for_setting(
-        settings, settings.get('song_artist_size', 155), role="artist",
-        weight=settings.get('song_artist_font_weight', 500),
-    )
-    font_song = get_font_for_setting(
-        settings, settings.get('song_title_size', 155), role="song", italic=True,
-        weight=settings.get('song_title_font_weight', 300),
-    )
-    
     # Song title, artist, and year are always rendered in solid black.
     text_color = "#000000"
-
-    def get_fitted_text_in_memory(text, font, max_width):
-        """Wrap text to fit within max_width."""
-        bbox = draw.textbbox((0, 0), text, font=font)
-        text_width = bbox[2] - bbox[0]
-        
-        if text_width <= max_width:
-            return text
-        
-        avg_char_width = text_width / len(text)
-        chars_per_line = int(max_width / avg_char_width * 0.85)
-        wrapped = '\n'.join(textwrap.wrap(text, width=max(chars_per_line, 10)))
-        
-        return wrapped
-    
-    # Prepare text
-    song_text = get_fitted_text_in_memory(song_name, font_song, max_width)
-    artist_text = get_fitted_text_in_memory(artist, font_artist, max_width)
-    year_text = display_year
-    
-    # Draw centered text
     center_x = size / 2
     center_y = size / 2
-    draw.text((center_x, center_y), year_text, fill=text_color, 
-             font=font_year, anchor="mm")
-
     artist_edge_offset = card_distance_cm_to_pixels(
         size, SONG_ARTIST_TOP_EDGE_OFFSET_CM
     )
     title_edge_offset = card_distance_cm_to_pixels(
         size, SONG_TITLE_BOTTOM_EDGE_OFFSET_CM
     )
+    year_text = display_year
+    year_bbox = draw.textbbox(
+        (center_x, center_y), year_text, font=font_year, anchor="mm"
+    )
+    text_clearance = card_distance_cm_to_pixels(
+        size, SONG_TEXT_TO_YEAR_CLEARANCE_CM
+    )
+
+    # Fit each text block independently in the space outside the 2 mm
+    # protected area around the central year.
+    font_artist, artist_text = fit_song_text_to_height(
+        draw, artist, settings, settings.get('song_artist_size', 155),
+        role="artist", weight=settings.get('song_artist_font_weight', 500),
+        italic=False, max_width=max_width,
+        max_height=year_bbox[1] - text_clearance - artist_edge_offset,
+    )
+    font_song, song_text = fit_song_text_to_height(
+        draw, song_name, settings, settings.get('song_title_size', 155),
+        role="song", weight=settings.get('song_title_font_weight', 300),
+        italic=True, max_width=max_width,
+        max_height=(size - title_edge_offset) - year_bbox[3] - text_clearance,
+    )
+
+    # Draw centered text
+    draw.text((center_x, center_y), year_text, fill=text_color,
+              font=font_year, anchor="mm")
     draw_centered_text_at_edge(
         draw, artist_text, font_artist, center_x, artist_edge_offset, "top"
     )
