@@ -1087,20 +1087,36 @@ if songs:
                 if previous_year is not None:
                     song['year_source'] = 'Manual'
 
-        with st.status("Generating cards...", expanded=True) as status:
+        generation_failed = False
+        with st.status("PDF generation queued...", expanded=True) as status:
             progress_bar = st.progress(0, text="Starting PDF generation...")
-            pdf_data = utils.create_pdf_in_memory(songs, progress_bar, settings_override=st.session_state.get('design_settings'))
-            status.update(label="✅ All Cards Generated!", state="complete")
-            progress_bar.empty()
 
-        st.session_state.pdf_data = pdf_data
-        st.session_state.pdf_fingerprint = (
-            utils.build_generation_fingerprint(
-                edited_df.to_dict(orient='records'),
-                st.session_state.get('design_settings', {}),
-            )
-        )
-        st.balloons()
+            def update_queue_position(position):
+                status.update(label=f"⏳ PDF generation queued: position {position}")
+
+            try:
+                with utils.pdf_generation_slot(
+                    on_wait=update_queue_position
+                ):
+                    status.update(label="Generating cards...")
+                    pdf_data = utils.create_pdf_in_memory(
+                        songs,
+                        progress_bar,
+                        settings_override=st.session_state.get(
+                            'design_settings'
+                        ),
+                    )
+            except RuntimeError as exc:
+                generation_failed = True
+                status.update(label="PDF generation failed", state="error")
+                st.error(str(exc))
+            else:
+                status.update(label="✅ All Cards Generated!", state="complete")
+            finally:
+                progress_bar.empty()
+
+        if not generation_failed:
+            st.session_state.pdf_data = pdf_data
 
     # Show download button if PDF exists
     if st.session_state.pdf_data:

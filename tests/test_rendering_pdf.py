@@ -2,6 +2,7 @@ import colorsys
 import random
 import tempfile
 import unittest
+from threading import Event, Thread
 from pathlib import Path
 from unittest.mock import patch
 
@@ -689,6 +690,68 @@ class PdfLayoutTests(unittest.TestCase):
                 [(x, y) for _, x, y in back],
             )
 
+
+class PdfMemorySafetyTests(unittest.TestCase):
+    def test_chunked_generation_uses_disk_merge(self):
+        songs = [{"year": 2000 + index} for index in range(13)]
+        rendered = []
+
+        def fake_render(
+            batch, progress_bar=None, settings_override=None,
+            all_years=None, card_index_offset=0,
+        ):
+            rendered.append((len(batch), list(all_years), card_index_offset))
+            return b"chunk"
+
+        def fake_merge(paths, output_path):
+            self.assertEqual([Path(path).read_bytes() for path in paths],
+                             [b"chunk", b"chunk"])
+            Path(output_path).write_bytes(b"merged")
+
+        with (
+            patch("src.utils._create_pdf_batch_in_memory",
+                  side_effect=fake_render),
+            patch("src.utils.merge_pdf_chunks", side_effect=fake_merge),
+        ):
+            result = utils.create_pdf_in_memory(songs)
+
+        self.assertEqual(result, b"merged")
+        self.assertEqual(
+            rendered,
+            [(12, list(range(2000, 2013)), 0),
+             (1, list(range(2000, 2013)), 12)],
+        )
+
+    def test_pdf_generation_slot_is_fifo(self):
+        entered = Event()
+        release = Event()
+        waiting = Event()
+        events = []
+
+        def first_job():
+            with utils.pdf_generation_slot():
+                events.append("first")
+                entered.set()
+                release.wait(timeout=2)
+
+        def second_job():
+            with utils.pdf_generation_slot(on_wait=lambda _: waiting.set()):
+                events.append("second")
+
+        first = Thread(target=first_job)
+        first.start()
+        self.assertTrue(entered.wait(timeout=2))
+        second = Thread(target=second_job)
+        second.start()
+        self.assertTrue(waiting.wait(timeout=2))
+        self.assertEqual(events, ["first"])
+
+        release.set()
+        first.join(timeout=2)
+        second.join(timeout=2)
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(events, ["first", "second"])
 
 if __name__ == "__main__":
     unittest.main()

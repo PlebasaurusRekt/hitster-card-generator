@@ -14,8 +14,11 @@ import secrets
 import re
 import zlib
 import threading
-from collections import OrderedDict
+import subprocess
+import tempfile
+from collections import OrderedDict, deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from functools import lru_cache
 import qrcode
 import requests
@@ -39,6 +42,57 @@ from src.input_validation import (
 )
 
 UTILS_API_VERSION = 9
+
+# A Streamlit deployment runs every user session in this same Python process.
+# Rendering several 720 DPI documents together exhausts its RAM, so PDF jobs
+# must use this process-wide FIFO rather than one renderer per session.
+_pdf_generation_condition = threading.Condition()
+_pdf_generation_waiters = deque()
+_pdf_generation_active = False
+
+@contextmanager
+def pdf_generation_slot(on_wait=None):
+    """Reserve the single process-wide slot for a memory-heavy PDF job.
+
+    Streamlit sessions share a process, so a normal per-session lock is not
+    enough: every requester must wait on the same FIFO. ``on_wait`` receives
+    the one-based queue position while this caller is waiting.
+    """
+    global _pdf_generation_active
+
+    ticket = object()
+    acquired = False
+    with _pdf_generation_condition:
+        _pdf_generation_waiters.append(ticket)
+
+    try:
+        while True:
+            with _pdf_generation_condition:
+                if (
+                    not _pdf_generation_active
+                    and _pdf_generation_waiters[0] is ticket
+                ):
+                    _pdf_generation_waiters.popleft()
+                    _pdf_generation_active = True
+                    acquired = True
+                    break
+                position = list(_pdf_generation_waiters).index(ticket) + 1
+
+            if on_wait is not None:
+                on_wait(position)
+
+            with _pdf_generation_condition:
+                _pdf_generation_condition.wait(timeout=0.25)
+
+        yield
+    finally:
+        with _pdf_generation_condition:
+            if acquired:
+                _pdf_generation_active = False
+            elif ticket in _pdf_generation_waiters:
+                _pdf_generation_waiters.remove(ticket)
+            _pdf_generation_condition.notify_all()
+
 PERFORMER_TYPE_SOLO = "Solo"
 PERFORMER_TYPE_GROUP = "Group"
 PERFORMER_TYPE_UNKNOWN = "Unknown"
@@ -3014,7 +3068,10 @@ def fetch_no_api_data_from_list(
     return songs
 
 
-def create_pdf_in_memory(songs, progress_bar=None, settings_override=None):
+def _create_pdf_batch_in_memory(
+    songs, progress_bar=None, settings_override=None, all_years=None,
+    card_index_offset=0,
+):
     if not songs:
         return None
 
@@ -3029,8 +3086,11 @@ def create_pdf_in_memory(songs, progress_bar=None, settings_override=None):
     card_size = PDF_CARD_SIZE
 
     total_cards = len(songs)
-    years = [song['year'] for song in songs]
-    starting_number = int(settings.get('card_number_start', 1))
+    years = (
+        list(all_years) if all_years is not None
+        else [song['year'] for song in songs]
+    )
+    starting_number = int(settings.get('card_number_start', 1)) + card_index_offset
 
     for i in range(0, total_cards, PDF_CARDS_PER_PAGE):
         batch_songs = list(songs[i:i + PDF_CARDS_PER_PAGE])
@@ -3112,3 +3172,60 @@ def create_pdf_in_memory(songs, progress_bar=None, settings_override=None):
     pdf_data = buffer.getvalue()
     buffer.close()
     return pdf_data
+
+
+def merge_pdf_chunks(chunk_paths, output_path):
+    """Merge disk-backed PDF chunks without rasterizing their pages."""
+    if not chunk_paths:
+        raise ValueError("No PDF chunks were generated.")
+    command = ["qpdf", "--empty", "--pages", *map(str, chunk_paths), "--", str(output_path)]
+    try:
+        subprocess.run(command, check=True, capture_output=True, text=True)
+    except FileNotFoundError as exc:
+        raise RuntimeError("PDF merging requires qpdf. Install the qpdf system package.") from exc
+    except subprocess.CalledProcessError as exc:
+        details = (exc.stderr or exc.stdout or "unknown qpdf error").strip()
+        raise RuntimeError(f"Could not merge generated PDF chunks: {details}") from exc
+
+
+def create_pdf_in_memory(songs, progress_bar=None, settings_override=None):
+    """Render bounded PDF chunks to disk, then merge them losslessly."""
+    if not songs:
+        return None
+
+    settings = get_pdf_render_settings(get_settings(settings_override))
+    total_cards = len(songs)
+    years = [song['year'] for song in songs]
+
+    with tempfile.TemporaryDirectory(prefix="hitster-pdf-") as directory:
+        chunk_paths = []
+        for start in range(0, total_cards, PDF_CARDS_PER_PAGE):
+            batch_songs = list(songs[start:start + PDF_CARDS_PER_PAGE])
+            chunk_data = _create_pdf_batch_in_memory(
+                batch_songs,
+                settings_override=settings,
+                all_years=years,
+                card_index_offset=start,
+            )
+            chunk_path = os.path.join(
+                directory, f"batch_{start // PDF_CARDS_PER_PAGE:03d}.pdf"
+            )
+            with open(chunk_path, "wb") as file_handle:
+                file_handle.write(chunk_data)
+            chunk_paths.append(chunk_path)
+            del chunk_data
+            gc.collect()
+
+            if progress_bar:
+                processed = min(start + PDF_CARDS_PER_PAGE, total_cards)
+                progress_bar.progress(
+                    processed / total_cards,
+                    text=f"Generated {processed}/{total_cards} cards...",
+                )
+
+        merged_path = os.path.join(directory, "hitster_cards.pdf")
+        if progress_bar:
+            progress_bar.progress(1.0, text="Merging printable PDF...")
+        merge_pdf_chunks(chunk_paths, merged_path)
+        with open(merged_path, "rb") as file_handle:
+            return file_handle.read()
