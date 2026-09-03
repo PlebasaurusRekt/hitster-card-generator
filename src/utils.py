@@ -38,7 +38,21 @@ from src.input_validation import (
     rasterize_svg_image,
 )
 
-UTILS_API_VERSION = 8
+UTILS_API_VERSION = 9
+PERFORMER_TYPE_SOLO = "Solo"
+PERFORMER_TYPE_GROUP = "Group"
+PERFORMER_TYPE_UNKNOWN = "Unknown"
+PERFORMER_TYPES = (
+    PERFORMER_TYPE_SOLO,
+    PERFORMER_TYPE_GROUP,
+    PERFORMER_TYPE_UNKNOWN,
+)
+MUSICBRAINZ_URL_BATCH_SIZE = 100
+PERFORMER_TYPE_CACHE_MAX_ENTRIES = 4096
+FEATURED_CREDIT_PATTERN = re.compile(
+    r"\b(?:feat(?:uring)?|ft)\.?(?=\s|[()\[\]{},:;/\-–—]|$)",
+    re.IGNORECASE,
+)
 CARD_PHYSICAL_SIZE_CM = 6.5
 DEFAULT_QR_CODE_SIZE_CM = 2.5
 DEFAULT_QR_BORDER_CM = 0.1
@@ -61,6 +75,10 @@ SOLUTION_TITLE_TOP_OFFSET_CM = 0.2
 SOLUTION_TITLE_LEFT_OFFSET_CM = 0.11375
 CARD_NUMBER_RIGHT_OFFSET_CM = 0.3
 CARD_NUMBER_BOTTOM_OFFSET_CM = 0.3
+PERFORMER_ICON_TOP_OFFSET_CM = 0.2
+PERFORMER_ICON_RIGHT_OFFSET_CM = 0.3
+PERFORMER_ICON_TITLE_GAP_CM = 0.08
+PERFORMER_ICON_HEIGHT_CM = 0.36
 SONG_ARTIST_TO_YEAR_GAP_CM = 1.4
 SONG_YEAR_TO_TITLE_GAP_CM = 1.3
 # At the 2000 px preview resolution, this keeps a centered Montserrat year
@@ -321,6 +339,239 @@ def _validate_year(year: int | None) -> int | None:
 # =============================================================================
 _musicbrainz_lock = threading.Lock()
 _musicbrainz_last_request_at = 0.0
+_performer_type_cache = OrderedDict()
+_performer_type_cache_lock = threading.Lock()
+
+
+def _request_musicbrainz_json(endpoint, params):
+    """Return one rate-limited MusicBrainz JSON response."""
+    headers = {
+        "User-Agent": (
+            "hitster-card-generator/2.0 "
+            "(https://github.com/PlebasaurusRekt/hitster-card-generator)"
+        )
+    }
+    global _musicbrainz_last_request_at
+    with _musicbrainz_lock:
+        elapsed = time.monotonic() - _musicbrainz_last_request_at
+        wait_seconds = max(0.0, 1.1 - elapsed)
+        if wait_seconds:
+            time.sleep(wait_seconds)
+        response = get_http_session().get(
+            endpoint, params=params, headers=headers, timeout=10,
+        )
+        _musicbrainz_last_request_at = time.monotonic()
+        if response.status_code in (429, 503):
+            retry_after = response.headers.get('Retry-After', '2')
+            try:
+                retry_seconds = min(5.0, max(1.0, float(retry_after)))
+            except ValueError:
+                retry_seconds = 2.0
+            time.sleep(retry_seconds)
+            response = get_http_session().get(
+                endpoint, params=params, headers=headers, timeout=10,
+            )
+            _musicbrainz_last_request_at = time.monotonic()
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise ValueError("MusicBrainz returned invalid JSON data.")
+    return payload
+
+
+def _canonical_spotify_artist_urls(artists):
+    """Return distinct, validated Spotify artist URLs in credit order."""
+    urls = []
+    if not isinstance(artists, list):
+        return urls
+    for artist in artists:
+        candidates = []
+        if isinstance(artist, dict):
+            external_urls = artist.get('external_urls')
+            if isinstance(external_urls, dict):
+                candidates.append(external_urls.get('spotify'))
+            candidates.extend([
+                artist.get('externalUrl'),
+                artist.get('url'),
+            ])
+            spotify_id = str(artist.get('id') or '').strip()
+            if spotify_id:
+                candidates.append(
+                    f"https://open.spotify.com/artist/{spotify_id}"
+                )
+            uri = str(artist.get('uri') or '').strip()
+            if uri.startswith('spotify:artist:'):
+                candidates.append(
+                    "https://open.spotify.com/artist/"
+                    + uri.rsplit(':', 1)[-1]
+                )
+        else:
+            candidates.append(artist)
+
+        for candidate in candidates:
+            if not candidate:
+                continue
+            try:
+                canonical_url = canonicalize_spotify_url(
+                    candidate, expected_kind='artist'
+                )
+            except InputValidationError:
+                continue
+            if canonical_url not in urls:
+                urls.append(canonical_url)
+            break
+    return urls
+
+
+def _performer_type_cache_get(artist_url):
+    with _performer_type_cache_lock:
+        value = _performer_type_cache.get(artist_url)
+        if value is not None:
+            _performer_type_cache.move_to_end(artist_url)
+        return value
+
+
+def _performer_type_cache_put(artist_url, performer_type):
+    with _performer_type_cache_lock:
+        _performer_type_cache[artist_url] = performer_type
+        _performer_type_cache.move_to_end(artist_url)
+        while len(_performer_type_cache) > PERFORMER_TYPE_CACHE_MAX_ENTRIES:
+            _performer_type_cache.popitem(last=False)
+
+
+def _musicbrainz_url_entries(payload):
+    if isinstance(payload.get('urls'), list):
+        return payload['urls']
+    if payload.get('resource'):
+        return [payload]
+    return []
+
+
+def get_performer_types_from_musicbrainz(artist_urls):
+    """Map exact Spotify artist URLs to Solo, Group, or Unknown."""
+    normalized_urls = _canonical_spotify_artist_urls(list(artist_urls))
+    results = {}
+    pending_urls = []
+    for artist_url in normalized_urls:
+        cached = _performer_type_cache_get(artist_url)
+        if cached is None:
+            pending_urls.append(artist_url)
+        else:
+            results[artist_url] = cached
+
+    request_failed = False
+    endpoint = "https://musicbrainz.org/ws/2/url"
+    for start in range(0, len(pending_urls), MUSICBRAINZ_URL_BATCH_SIZE):
+        batch = pending_urls[start:start + MUSICBRAINZ_URL_BATCH_SIZE]
+        params = [('resource', artist_url) for artist_url in batch]
+        params.extend([('inc', 'artist-rels'), ('fmt', 'json')])
+        try:
+            payload = _request_musicbrainz_json(endpoint, params)
+        except (
+            AttributeError,
+            TypeError,
+            ValueError,
+            requests.RequestException,
+            requests.JSONDecodeError,
+        ):
+            request_failed = True
+            continue
+
+        for entry in _musicbrainz_url_entries(payload):
+            if not isinstance(entry, dict):
+                continue
+            try:
+                artist_url = canonicalize_spotify_url(
+                    entry.get('resource'), expected_kind='artist'
+                )
+            except InputValidationError:
+                continue
+            if artist_url not in batch:
+                continue
+
+            raw_types = set()
+            relations = entry.get('relations')
+            if not isinstance(relations, list):
+                continue
+            for relation in relations:
+                if not isinstance(relation, dict):
+                    continue
+                related_artist = relation.get('artist')
+                if (
+                    relation.get('target-type') == 'artist'
+                    and isinstance(related_artist, dict)
+                    and related_artist.get('type')
+                ):
+                    raw_types.add(str(related_artist['type']).strip())
+            if not raw_types:
+                continue
+
+            if len(raw_types) != 1:
+                performer_type = PERFORMER_TYPE_UNKNOWN
+            else:
+                musicbrainz_type = next(iter(raw_types)).casefold()
+                if musicbrainz_type == 'person':
+                    performer_type = PERFORMER_TYPE_SOLO
+                elif musicbrainz_type in {'group', 'orchestra', 'choir'}:
+                    performer_type = PERFORMER_TYPE_GROUP
+                else:
+                    performer_type = PERFORMER_TYPE_UNKNOWN
+            results[artist_url] = performer_type
+            _performer_type_cache_put(artist_url, performer_type)
+
+    return results, request_failed
+
+
+def enrich_performer_types(songs):
+    """Add conservative song-level performer classifications in place."""
+    pending_by_url = {}
+    for song in songs:
+        existing = str(song.get('performer_type') or '').strip().casefold()
+        normalized_existing = next(
+            (value for value in PERFORMER_TYPES if value.casefold() == existing),
+            None,
+        )
+        artist_urls = _canonical_spotify_artist_urls(
+            song.get('spotify_artist_urls') or []
+        )
+        song['spotify_artist_urls'] = artist_urls
+        if normalized_existing is not None:
+            song['performer_type'] = normalized_existing
+            continue
+
+        artist_credit = str(song.get('artist') or '')
+        original_title = str(
+            song.get('original_name') or song.get('name') or ''
+        )
+        if (
+            len(artist_urls) > 1
+            or ',' in artist_credit
+            or FEATURED_CREDIT_PATTERN.search(original_title)
+            or FEATURED_CREDIT_PATTERN.search(artist_credit)
+        ):
+            song['performer_type'] = PERFORMER_TYPE_GROUP
+        elif len(artist_urls) == 1:
+            pending_by_url.setdefault(artist_urls[0], []).append(song)
+        else:
+            song['performer_type'] = PERFORMER_TYPE_UNKNOWN
+
+    resolved_types, lookup_failed = get_performer_types_from_musicbrainz(
+        pending_by_url
+    )
+    for artist_url, matching_songs in pending_by_url.items():
+        performer_type = resolved_types.get(
+            artist_url, PERFORMER_TYPE_UNKNOWN
+        )
+        for song in matching_songs:
+            song['performer_type'] = performer_type
+
+    return {
+        'unknown_count': sum(
+            song.get('performer_type') == PERFORMER_TYPE_UNKNOWN
+            for song in songs
+        ),
+        'lookup_failed': lookup_failed,
+    }
 
 
 @lru_cache(maxsize=2048)
@@ -999,6 +1250,7 @@ def parse_playlist_data(playlist_data):
             continue
 
         release_date = album.get('release_date', '')
+        spotify_artist_urls = _canonical_spotify_artist_urls(artists)
         try:
             spotify_year = _validate_year(
                 int(str(release_date).split('-')[0])
@@ -1015,6 +1267,7 @@ def parse_playlist_data(playlist_data):
                 'Spotify' if spotify_year is not None else None
             ),
             'artist': artist,
+            'spotify_artist_urls': spotify_artist_urls,
             'link': link,
             'album': str(album.get('name') or ''),
         })
@@ -1403,14 +1656,14 @@ def get_font_for_setting(settings, size, role="artist", italic=False, weight=700
 
 def create_solution_side(
     song_name, artist, year, all_years, output_path, card_number=None,
-    settings_override=None,
+    settings_override=None, performer_type=None,
 ):
     """
     Create solution card with year-based color background.
     """
     img = create_solution_side_in_memory(
         song_name, artist, year, all_years, card_number=card_number,
-        settings_override=settings_override,
+        settings_override=settings_override, performer_type=performer_type,
     )
     img.save(output_path)
     return output_path
@@ -1941,7 +2194,9 @@ def render_qr_code(img, qr_code, settings):
     img.paste(overlay, (left, top), mask_img)
 
 
-def render_game_title(img, settings, side="qr", qr_code=None):
+def render_game_title(
+    img, settings, side="qr", qr_code=None, solution_right_limit=None,
+):
     """Render the game title / card label."""
     prefix = "qr" if side == "qr" else "sol"
     title_image = settings.get(f'{prefix}_title_image')
@@ -1952,7 +2207,9 @@ def render_game_title(img, settings, side="qr", qr_code=None):
         return
 
     if isinstance(title_image, Image.Image):
-        render_title_image(img, title_image, settings, side, qr_code)
+        render_title_image(
+            img, title_image, settings, side, qr_code, solution_right_limit
+        )
         return
 
     default_pos = 'top' if side == 'qr' else 'in_border_top_left'
@@ -1981,6 +2238,34 @@ def render_game_title(img, settings, side="qr", qr_code=None):
     ink_bbox = font.getmask(title).getbbox()
     ink_left, ink_top, ink_right, ink_bottom = ink_bbox or (0, 0, tw, th)
     
+    if side == "sol" and solution_right_limit is not None:
+        title_left = card_distance_cm_to_pixels(
+            size, SOLUTION_TITLE_LEFT_OFFSET_CM
+        )
+        available_width = max(1, solution_right_limit - title_left)
+        ink_width = ink_right - ink_left
+        if ink_width > available_width:
+            font_size = max(
+                1, int(font_size * available_width / ink_width)
+            )
+            while True:
+                font = get_font_for_setting(
+                    settings, font_size, role=title_role,
+                    italic=title_is_italic,
+                    weight=settings.get('card_set_title_font_weight', 500),
+                )
+                bbox = draw.textbbox((0, 0), title, font=font)
+                tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+                ink_bbox = font.getmask(title).getbbox()
+                ink_left, ink_top, ink_right, ink_bottom = (
+                    ink_bbox or (0, 0, tw, th)
+                )
+                if (
+                    ink_right - ink_left <= available_width
+                    or font_size == 1
+                ):
+                    break
+                font_size -= 1
     center = size // 2
     qr_size = (
         get_qr_render_geometry(qr_code, settings)[2]
@@ -2057,7 +2342,10 @@ def render_game_title(img, settings, side="qr", qr_code=None):
     img.paste(text_overlay, (0, 0), text_overlay)
 
 
-def render_title_image(img, title_image, settings, side="qr", qr_code=None):
+def render_title_image(
+    img, title_image, settings, side="qr", qr_code=None,
+    solution_right_limit=None,
+):
     """Render title artwork at the same physical size as a title font setting."""
     if title_image.width <= 0 or title_image.height <= 0:
         return
@@ -2090,6 +2378,12 @@ def render_title_image(img, title_image, settings, side="qr", qr_code=None):
     if side == "sol":
         left = card_distance_cm_to_pixels(size, SOLUTION_TITLE_LEFT_OFFSET_CM)
         top = card_distance_cm_to_pixels(size, SOLUTION_TITLE_TOP_OFFSET_CM)
+        if solution_right_limit is not None:
+            available_width = max(1, solution_right_limit - left)
+            if width > available_width:
+                scale = available_width / width
+                width = available_width
+                height = max(1, round(height * scale))
     else:
         positions = {
             "top": ((size - width) // 2, margin),
@@ -2143,6 +2437,137 @@ def render_title_image(img, title_image, settings, side="qr", qr_code=None):
         )
         artwork.putalpha(alpha)
     img.paste(artwork, (left, top), artwork)
+
+
+def get_performer_type_icon_bounds(card_size, performer_type):
+    """Return the reserved pixel bounds for a performer pictogram."""
+    normalized = next(
+        (
+            value for value in PERFORMER_TYPES
+            if value.casefold() == str(performer_type or '').strip().casefold()
+        ),
+        None,
+    )
+    if normalized is None:
+        return None
+
+    icon_height = max(
+        8, card_distance_cm_to_pixels(card_size, PERFORMER_ICON_HEIGHT_CM)
+    )
+    top = card_distance_cm_to_pixels(
+        card_size, PERFORMER_ICON_TOP_OFFSET_CM
+    )
+    right = card_size - card_distance_cm_to_pixels(
+        card_size, PERFORMER_ICON_RIGHT_OFFSET_CM
+    )
+    if normalized == PERFORMER_TYPE_GROUP:
+        icon_width = round(icon_height * 1.52)
+    elif normalized == PERFORMER_TYPE_SOLO:
+        icon_width = round(icon_height * 0.56)
+    else:
+        icon_width = icon_height
+    return right - icon_width, top, right, top + icon_height
+
+
+def render_performer_type_icon(img, performer_type, settings):
+    """Draw the solution-side Solo, Group, or Unknown pictogram."""
+    normalized = next(
+        (
+            value for value in PERFORMER_TYPES
+            if value.casefold() == str(performer_type or '').strip().casefold()
+        ),
+        None,
+    )
+    if normalized is None:
+        return
+
+    icon_height = max(
+        8, card_distance_cm_to_pixels(img.height, PERFORMER_ICON_HEIGHT_CM)
+    )
+    top = card_distance_cm_to_pixels(
+        img.height, PERFORMER_ICON_TOP_OFFSET_CM
+    )
+    right = img.width - card_distance_cm_to_pixels(
+        img.width, PERFORMER_ICON_RIGHT_OFFSET_CM
+    )
+    stroke_width = max(1, round(img.width * 0.004))
+    fill = (255, 255, 255, 255)
+    outline = (0, 0, 0, 255)
+    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+
+    def draw_person(center_x, person_top, person_height):
+        head_radius = max(2, round(person_height * 0.16))
+        head_center_y = person_top + head_radius
+        draw.ellipse(
+            (
+                center_x - head_radius,
+                head_center_y - head_radius,
+                center_x + head_radius,
+                head_center_y + head_radius,
+            ),
+            fill=fill,
+            outline=outline,
+            width=stroke_width,
+        )
+        body_top = person_top + round(person_height * 0.38)
+        half_body_width = round(person_height * 0.27)
+        draw.rounded_rectangle(
+            (
+                center_x - half_body_width,
+                body_top,
+                center_x + half_body_width,
+                person_top + person_height,
+            ),
+            radius=max(2, round(person_height * 0.16)),
+            fill=fill,
+            outline=outline,
+            width=stroke_width,
+        )
+
+    if normalized == PERFORMER_TYPE_SOLO:
+        draw_person(
+            right - round(icon_height * 0.28), top, icon_height
+        )
+    elif normalized == PERFORMER_TYPE_GROUP:
+        back_height = round(icon_height * 0.78)
+        group_left = right - round(icon_height * 1.52)
+        draw_person(
+            group_left + round(icon_height * 0.30),
+            top + icon_height - back_height,
+            back_height,
+        )
+        draw_person(
+            group_left + round(icon_height * 1.22),
+            top + icon_height - back_height,
+            back_height,
+        )
+        draw_person(
+            group_left + round(icon_height * 0.76), top, icon_height
+        )
+    else:
+        left = right - icon_height
+        draw.ellipse(
+            (left, top, right, top + icon_height),
+            fill=fill,
+            outline=outline,
+            width=stroke_width,
+        )
+        font = get_font_for_setting(
+            settings,
+            max(6, round(icon_height * 0.68)),
+            role="artist",
+            weight=700,
+        )
+        draw.text(
+            (left + icon_height / 2, top + icon_height / 2),
+            "?",
+            fill=outline,
+            font=font,
+            anchor="mm",
+        )
+
+    img.paste(overlay, (0, 0), overlay)
 
 
 def render_card_number(img, card_number, settings, side="qr"):
@@ -2308,7 +2733,8 @@ def fit_song_text_to_height(
 
 
 def create_solution_side_in_memory(
-    song_name, artist, year, all_years, settings_override=None, card_number=None
+    song_name, artist, year, all_years, settings_override=None,
+    card_number=None, performer_type=None,
 ):
     """
     Create solution card and return the PIL Image object directly.
@@ -2403,7 +2829,22 @@ def create_solution_side_in_memory(
     )
         
     # Render Custom Title on Solution Side
-    render_game_title(img, settings, side="sol")
+    icon_bounds = get_performer_type_icon_bounds(size, performer_type)
+    solution_right_limit = None
+    if icon_bounds is not None:
+        solution_right_limit = (
+            icon_bounds[0]
+            - card_distance_cm_to_pixels(
+                size, PERFORMER_ICON_TITLE_GAP_CM
+            )
+        )
+    render_game_title(
+        img,
+        settings,
+        side="sol",
+        solution_right_limit=solution_right_limit,
+    )
+    render_performer_type_icon(img, performer_type, settings)
     render_card_number(img, card_number, settings, side="sol")
     
     return img
@@ -2429,6 +2870,7 @@ def _fetch_spotify_embed_metadata(canonical_url):
         raise ValueError("Spotify embed returned an unexpected track")
 
     title = str(entity.get('name') or '').strip()
+    artist_urls = _canonical_spotify_artist_urls(entity.get('artists'))
     artist = _format_spotify_artists(entity.get('artists'))
     release_date = entity.get('releaseDate') or {}
     release_text = str(release_date.get('isoString') or '')
@@ -2438,7 +2880,7 @@ def _fetch_spotify_embed_metadata(canonical_url):
         original_year = None
     if not title or not artist:
         raise ValueError("Incomplete Spotify embed metadata")
-    return title, artist, original_year
+    return title, artist, original_year, artist_urls
 
 
 def _fetch_public_track_metadata(url):
@@ -2448,20 +2890,24 @@ def _fetch_public_track_metadata(url):
             canonical_url, expected_kind='track'
         )
     except requests.RequestException:
-        title, artist, original_year = _fetch_spotify_embed_metadata(
+        title, artist, original_year, artist_urls = _fetch_spotify_embed_metadata(
             canonical_url
         )
     else:
         soup = BeautifulSoup(html_text, 'html.parser')
         title_tag = soup.find('meta', property='og:title')
         description_tag = soup.find('meta', property='og:description')
+        artist_urls = _canonical_spotify_artist_urls([
+            tag.get('content')
+            for tag in soup.find_all('meta', attrs={'name': 'music:musician'})
+        ])
         if title_tag and description_tag:
             title = title_tag.get('content', '').strip()
             description = description_tag.get('content', '')
             artist = description.split(' · ')[0].strip()
             original_year = None
         else:
-            title, artist, original_year = _fetch_spotify_embed_metadata(
+            title, artist, original_year, artist_urls = _fetch_spotify_embed_metadata(
                 canonical_url
             )
 
@@ -2477,6 +2923,7 @@ def _fetch_public_track_metadata(url):
         'year_source': year_source,
         'artist': artist,
         'link': canonical_url,
+        'spotify_artist_urls': artist_urls,
     }
 
 
@@ -2634,7 +3081,8 @@ def create_pdf_in_memory(songs, progress_bar=None, settings_override=None):
 
             sol_pil = create_solution_side_in_memory(
                 song['name'], song['artist'], song['year'], years,
-                settings_override=settings, card_number=card_number
+                settings_override=settings, card_number=card_number,
+                performer_type=song.get('performer_type'),
             )
 
             sol_byte_arr = io.BytesIO()

@@ -10,6 +10,8 @@ CLIENT_ID = "client-id"
 CLIENT_SECRET = "client-secret"
 REDIRECT_URI = "https://hitster-card-generator2.streamlit.app/"
 PLAYLIST_ID = "ZYXWVUTSRQPONMLKJIHGFE"
+ARTIST_ID = "1111111111111111111111"
+ARTIST_URL = f"https://open.spotify.com/artist/{ARTIST_ID}"
 TRACK_ID = "0123456789ABCDEFGHIJKL"
 TRACK_URL = f"https://open.spotify.com/track/{TRACK_ID}"
 
@@ -140,7 +142,13 @@ class SpotifyPlaylistTests(unittest.TestCase):
             "item": {
                 "type": "track",
                 "name": name,
-                "artists": [{"name": "Artist"}],
+                "artists": [{
+                    "name": "Artist",
+                    "id": ARTIST_ID,
+                    "external_urls": {
+                        "spotify": f"{ARTIST_URL}?si=tracking"
+                    },
+                }],
                 "album": {
                     "name": "Album",
                     "release_date": "1999-01-01",
@@ -174,6 +182,11 @@ class SpotifyPlaylistTests(unittest.TestCase):
         songs = utils.parse_playlist_data(playlist)
         self.assertEqual([song["name"] for song in songs], ["One", "Two"])
         self.assertEqual([song["year"] for song in songs], [1999, 1999])
+
+        self.assertEqual(
+            [song["spotify_artist_urls"] for song in songs],
+            [[ARTIST_URL], [ARTIST_URL]],
+        )
 
     def test_rejects_pagination_host_escape(self):
         session = SequenceSession(get_responses=[

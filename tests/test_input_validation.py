@@ -17,6 +17,7 @@ from src.input_validation import (
 
 TRACK_ID = "0123456789ABCDEFGHIJKL"
 PLAYLIST_ID = "ZYXWVUTSRQPONMLKJIHGFE"
+ARTIST_ID = "1111111111111111111111"
 
 
 class Upload:
@@ -40,6 +41,13 @@ class SpotifyInputValidationTests(unittest.TestCase):
                 f"https://open.spotify.com/intl-nl/playlist/{PLAYLIST_ID}"
             ),
             f"https://open.spotify.com/playlist/{PLAYLIST_ID}",
+        )
+        self.assertEqual(
+            canonicalize_spotify_url(
+                f"https://open.spotify.com/artist/{ARTIST_ID}?si=abc",
+                expected_kind="artist",
+            ),
+            f"https://open.spotify.com/artist/{ARTIST_ID}",
         )
 
     def test_rejects_ssrf_and_ambiguous_urls(self):

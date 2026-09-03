@@ -31,8 +31,14 @@ class MetadataTests(unittest.TestCase):
                                 "id": url.rsplit("/", 1)[-1],
                                 "name": "Wrecking Ball",
                                 "artists": [
-                                    {"name": "Miley Cyrus"},
-                                    {"name": "Dua Lipa"},
+                                    {
+                                        "name": "Miley Cyrus",
+                                        "id": "1111111111111111111111",
+                                    },
+                                    {
+                                        "name": "Dua Lipa",
+                                        "id": "2222222222222222222222",
+                                    },
                                 ],
                                 "releaseDate": {
                                     "isoString": "2013-10-04T00:00:00Z"
@@ -69,6 +75,13 @@ class MetadataTests(unittest.TestCase):
         self.assertEqual(song["artist"], "Miley Cyrus, Dua Lipa")
         self.assertEqual(song["original_year"], 2013)
         self.assertEqual(song["link"], url)
+        self.assertEqual(song["spotify_artist_urls"], [
+            (
+                "https://open.spotify.com/artist/"
+                "1111111111111111111111"
+            ),
+            "https://open.spotify.com/artist/2222222222222222222222",
+        ])
         year_fetch.assert_called_once_with(
             "Wrecking Ball", "Miley Cyrus, Dua Lipa", 2013
         )
@@ -187,10 +200,18 @@ class CliTests(unittest.TestCase):
                 "Song",
             )
             self.assertEqual(
+                json.loads((cards / "songs.json").read_text())[0][
+                    "performer_type"
+                ], "Unknown"
+            )
+            self.assertEqual(
                 qr_render.call_args.kwargs["settings_override"], settings
             )
             self.assertEqual(
                 sol_render.call_args.kwargs["settings_override"], settings
+            )
+            self.assertEqual(
+                sol_render.call_args.kwargs["performer_type"], "Unknown"
             )
             create_pdf.assert_called_once()
             self.assertEqual(

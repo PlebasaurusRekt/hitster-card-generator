@@ -88,7 +88,23 @@ def generate_hitster_cards(
 
     if not isinstance(songs, list) or not songs:
         raise utils.SpotifyAPIError("No usable songs were found.")
-    if fetch or not os.path.exists(json_file):
+    metadata_needs_save = (
+        fetch
+        or not os.path.exists(json_file)
+        or any(
+            song.get('performer_type') not in utils.PERFORMER_TYPES
+            or 'spotify_artist_urls' not in song
+            for song in songs
+        )
+    )
+    classification = utils.enrich_performer_types(songs)
+    if classification['lookup_failed']:
+        print("⚠ MusicBrainz classification was unavailable for some artists.")
+    if classification['unknown_count']:
+        print(
+            f"⚠ {classification['unknown_count']} song(s) remain Unknown."
+        )
+    if metadata_needs_save:
         with open(json_file, 'w', encoding='utf-8') as file_handle:
             json.dump(songs, file_handle, indent=2)
 
@@ -123,6 +139,7 @@ def generate_hitster_cards(
             solution_path,
             card_number=card_number,
             settings_override=settings,
+            performer_type=song.get('performer_type'),
         )
         if (index + 1) % 20 == 0:
             print(f"  Progress: {index + 1}/{len(songs)}...")

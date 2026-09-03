@@ -167,7 +167,7 @@ def _load_svg_image(raw: bytes) -> Image.Image:
 
 
 def canonicalize_spotify_url(url: str, expected_kind: str | None = None) -> str:
-    """Validate and return a canonical Spotify track or playlist URL."""
+    """Validate and return a canonical Spotify track, playlist, or artist URL."""
     candidate = str(url).strip()
     try:
         parsed = urllib.parse.urlsplit(candidate)
@@ -189,9 +189,9 @@ def canonicalize_spotify_url(url: str, expected_kind: str | None = None) -> str:
     parts = [urllib.parse.unquote(part) for part in parsed.path.split("/") if part]
     if len(parts) == 3 and parts[0].lower().startswith("intl-"):
         parts = parts[1:]
-    if len(parts) != 2 or parts[0] not in {"track", "playlist"}:
+    if len(parts) != 2 or parts[0] not in {"track", "playlist", "artist"}:
         raise InputValidationError(
-            "Use a Spotify track or playlist share URL."
+            "Use a Spotify track, playlist, or artist URL."
         )
 
     kind, spotify_id = parts

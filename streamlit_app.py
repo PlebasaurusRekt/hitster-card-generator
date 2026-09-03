@@ -7,7 +7,7 @@ import pandas as pd
 import src.input_validation as input_validation
 import src.utils as utils
 
-EXPECTED_UTILS_API_VERSION = 8
+EXPECTED_UTILS_API_VERSION = 9
 if getattr(utils, 'UTILS_API_VERSION', 0) < EXPECTED_UTILS_API_VERSION:
     utils = importlib.reload(utils)
 
@@ -879,7 +879,19 @@ if st.button("🔍 Fetch Song Metadata", type="primary"):
                         "because Spotify returned incomplete metadata."
                     )
 
-            status.update(label=f"✅ Fetched {len(songs)} songs!", state="complete")
+            st.write("Classifying solo artists and groups...")
+            classification = utils.enrich_performer_types(songs)
+            if classification['lookup_failed']:
+                st.warning(
+                    "MusicBrainz could not classify some artists. "
+                    "They were left as Unknown."
+                )
+            status.update(
+                label=(
+                    f"✅ Fetched and classified {len(songs)} songs!"
+                ),
+                state="complete",
+            )
             progress_bar.empty()
 
         st.session_state.songs = songs
@@ -901,6 +913,7 @@ if songs:
             "Song": s['name'],
             "Year": s['year'] if s['year'] is not None else None,
             "Source": s.get('year_source', ''),
+            "Performer Type": s.get('performer_type', 'Unknown'),
             "Link": s['link'],
         }
         for s in songs
@@ -916,6 +929,12 @@ if songs:
             "Source": st.column_config.TextColumn("Source", disabled=True, 
                                                    help="Where the year came from"),
             "Link": st.column_config.TextColumn("Link", disabled=False),
+            "Performer Type": st.column_config.SelectboxColumn(
+                "Performer Type",
+                options=list(utils.PERFORMER_TYPES),
+                required=True,
+                help="Automatically classified; choose a different value if needed.",
+            ),
         },
         width="stretch",
         num_rows="fixed",
@@ -939,6 +958,13 @@ if songs:
     if unknown_count > 0:
         st.warning(f"⚠️ {unknown_count} song(s) have no year. Please fill them in above, "
                    "or they will show as '????' on the cards.")
+    unknown_performer_count = (
+        edited_df['Performer Type'] == utils.PERFORMER_TYPE_UNKNOWN
+    ).sum()
+    if unknown_performer_count:
+        st.info(
+            f"{unknown_performer_count} song(s) have an Unknown performer type."
+        )
 
     # --- CARD PREVIEW ---
     st.divider()
@@ -974,6 +1000,7 @@ if songs:
             'link': link_str,
             'all_years': valid_preview_years,
             'card_number': preview_card_number,
+            'performer_type': str(preview_song['Performer Type']),
         },
         settings,
     )
@@ -998,6 +1025,7 @@ if songs:
                 valid_preview_years,
                 settings_override=settings,
                 card_number=preview_card_number,
+                performer_type=str(preview_song['Performer Type']),
             )
         )
         st.session_state.preview_render_fingerprint = (
@@ -1035,6 +1063,7 @@ if songs:
             new_song_name = edited_df.iloc[i]['Song']
             new_year = edited_df.iloc[i]['Year']
             new_link = edited_df.iloc[i]['Link']
+            new_performer_type = edited_df.iloc[i]['Performer Type']
             
             if pd.notna(new_artist):
                 song['artist'] = str(new_artist)
@@ -1042,6 +1071,11 @@ if songs:
                 song['name'] = str(new_song_name)
             if pd.notna(new_link):
                 song['link'] = str(new_link)
+            if (
+                pd.notna(new_performer_type)
+                and new_performer_type in utils.PERFORMER_TYPES
+            ):
+                song['performer_type'] = str(new_performer_type)
 
             previous_year = song.get('year')
             if pd.notna(new_year):

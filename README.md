@@ -12,6 +12,7 @@ The app creates 6.5 × 6.5 cm cards on A4 sheets (3 × 4 per page), with QR-code
 - Import up to 500 tracks per run.
 - Optionally connect Spotify to read complete owned or collaborative playlists.
 - Correct artists, titles, years, and links before generation.
+- Automatically classify and correct tracks as Solo, Group, or Unknown.
 - Customize backgrounds, QR colors, neon rings, fonts, titles, labels, numbering, and ink-saving borders.
 - Generate a mirrored, duplex-ready PDF.
 - Use a four-module QR quiet zone with integer-aligned QR modules.
@@ -24,13 +25,29 @@ Use [https://hitster-card-generator2.streamlit.app/](https://hitster-card-genera
 
 1. Paste Spotify track links or one playlist share URL.
 2. Select **Fetch Song Metadata**.
-3. Review and correct the song table.
+3. Review and correct the song table, including its performer classifications.
 4. Customize the cards in the sidebar.
 5. Select **Create My PDF**, then download it.
 
 Public pages work without API credentials. If Spotify does not expose every playlist item publicly, connect Spotify or paste the individual track links.
 
+## Solo and group classification
+
+Every imported track is assigned an editable **Performer Type**. Collaborations
+are marked **Group** when Spotify lists multiple artists or when the original
+title or artist credit contains `feat.`, `ft.`, or `featuring`. Remaining
+single-artist credits are matched through an exact Spotify artist URL in
+MusicBrainz:
+
+- MusicBrainz people become **Solo**.
+- Groups, orchestras, and choirs become **Group**.
+- Missing, unsupported, or conflicting data remains **Unknown**.
+
 ## Local setup
+
+The solution side shows one-person, three-person, or question-mark pictograms.
+MusicBrainz failures never block card generation, and every result can be
+changed in the review table before creating the PDF.
 
 ```bash
 git clone https://github.com/PlebasaurusRekt/hitster-card-generator.git

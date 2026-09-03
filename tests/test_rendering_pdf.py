@@ -1,5 +1,4 @@
 import colorsys
-import math
 import random
 import tempfile
 import unittest
@@ -584,6 +583,7 @@ class PdfLayoutTests(unittest.TestCase):
         photoshop_layout = utils.get_pdf_grid_layout(*photoshop_page_size)
 
         self.assertAlmostEqual(standard_layout[0], photoshop_layout[0])
+
     def test_qr_page_rotation_is_opt_in_and_rotates_the_complete_grid(self):
         class CanvasSpy:
             def __init__(self):
