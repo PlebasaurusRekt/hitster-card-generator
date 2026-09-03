@@ -30,7 +30,10 @@ class MetadataTests(unittest.TestCase):
                                 "type": "track",
                                 "id": url.rsplit("/", 1)[-1],
                                 "name": "Wrecking Ball",
-                                "artists": [{"name": "Miley Cyrus"}],
+                                "artists": [
+                                    {"name": "Miley Cyrus"},
+                                    {"name": "Dua Lipa"},
+                                ],
                                 "releaseDate": {
                                     "isoString": "2013-10-04T00:00:00Z"
                                 },
@@ -63,11 +66,11 @@ class MetadataTests(unittest.TestCase):
             song = utils._fetch_public_track_metadata(url)
 
         self.assertEqual(song["original_name"], "Wrecking Ball")
-        self.assertEqual(song["artist"], "Miley Cyrus")
+        self.assertEqual(song["artist"], "Miley Cyrus, Dua Lipa")
         self.assertEqual(song["original_year"], 2013)
         self.assertEqual(song["link"], url)
         year_fetch.assert_called_once_with(
-            "Wrecking Ball", "Miley Cyrus", 2013
+            "Wrecking Ball", "Miley Cyrus, Dua Lipa", 2013
         )
         embed_fetch.assert_called_once_with(
             url.replace("/track/", "/embed/track/"),

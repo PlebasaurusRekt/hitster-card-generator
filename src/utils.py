@@ -936,6 +936,20 @@ def fetch_spotify_playlist_with_token(playlist_url, access_token):
     }
 
 
+def _format_spotify_artists(artists):
+    """Return Spotify artist names as a consistent comma-separated string."""
+    if not isinstance(artists, list):
+        return ""
+    return ", ".join(
+        str(item.get('name') or '').strip()
+        for item in artists
+        if (
+            isinstance(item, dict)
+            and str(item.get('name') or '').strip()
+        )
+    )
+
+
 def parse_playlist_data(playlist_data):
     """Extract usable songs while skipping malformed playlist entries."""
     try:
@@ -967,12 +981,10 @@ def parse_playlist_data(playlist_data):
         album = track.get('album')
         external_urls = track.get('external_urls')
         name = track.get('name')
+        artist = _format_spotify_artists(artists)
         if (
             not name
-            or not isinstance(artists, list)
-            or not artists
-            or not isinstance(artists[0], dict)
-            or not artists[0].get('name')
+            or not artist
             or not isinstance(album, dict)
             or not isinstance(external_urls, dict)
         ):
@@ -1002,7 +1014,7 @@ def parse_playlist_data(playlist_data):
             'year_source': (
                 'Spotify' if spotify_year is not None else None
             ),
-            'artist': artists[0]['name'],
+            'artist': artist,
             'link': link,
             'album': str(album.get('name') or ''),
         })
@@ -2417,11 +2429,7 @@ def _fetch_spotify_embed_metadata(canonical_url):
         raise ValueError("Spotify embed returned an unexpected track")
 
     title = str(entity.get('name') or '').strip()
-    artist = ', '.join(
-        str(item.get('name') or '').strip()
-        for item in entity.get('artists') or []
-        if str(item.get('name') or '').strip()
-    )
+    artist = _format_spotify_artists(entity.get('artists'))
     release_date = entity.get('releaseDate') or {}
     release_text = str(release_date.get('isoString') or '')
     try:

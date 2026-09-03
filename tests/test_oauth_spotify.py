@@ -224,6 +224,17 @@ class SpotifyPlaylistTests(unittest.TestCase):
         self.assertEqual(len(songs), 1)
         self.assertEqual(songs[0]["artist"], "Artist")
 
+    def test_preserves_all_track_artists_as_comma_separated_text(self):
+        track = self.valid_track()
+        track["item"]["artists"] = [
+            {"name": "Artist One"},
+            {"name": "Artist Two"},
+        ]
+
+        songs = utils.parse_playlist_data({"tracks": {"items": [track]}})
+
+        self.assertEqual(songs[0]["artist"], "Artist One, Artist Two")
+
 
 if __name__ == "__main__":
     unittest.main()
